@@ -1,0 +1,515 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --font-sans: "Noto Sans SC", "Microsoft YaHei UI", "Microsoft YaHei", ui-sans-serif, sans-serif;
+  --font-serif: "Noto Serif SC", "Source Han Serif SC", "STSong", "SimSun", serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", Consolas, ui-monospace, monospace;
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-primary: var(--primary);
+  --color-sidebar-primary-foreground: var(--primary-foreground);
+  --color-sidebar-border: var(--border);
+  --color-sidebar-ring: var(--ring);
+
+  /* PKMX 语义色：状态 / 链接 / 印章 */
+  --color-st-todo: var(--st-todo);
+  --color-st-doing: var(--st-doing);
+  --color-st-blocked: var(--st-blocked);
+  --color-st-done: var(--st-done);
+  --color-st-wont: var(--st-wont);
+  --color-wikilink: var(--wikilink);
+  --color-seal: var(--seal);
+  --color-daily: var(--daily);
+  --color-warn: var(--warn);
+  --color-over: var(--over);
+
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+}
+
+/* ============ 昼白 ============ */
+:root {
+  --background: #fbfbf9;
+  --foreground: #1e2530;
+  --card: #ffffff;
+  --card-foreground: #1e2530;
+  --popover: #ffffff;
+  --popover-foreground: #1e2530;
+  --primary: #2b4c7e;
+  --primary-foreground: #f4f6fa;
+  --secondary: #f5f5f2;
+  --secondary-foreground: #3a4150;
+  --muted: #efefea;
+  --muted-foreground: #6e7480;
+  --accent: #e9eef6;
+  --accent-foreground: #1f3a61;
+  --destructive: #be4b31;
+  --destructive-foreground: #fdf4f0;
+  --border: #e1e2dc;
+  --input: #e1e2dc;
+  --ring: #2b4c7e;
+  --sidebar: #f5f5f2;
+  --sidebar-foreground: #1e2530;
+  --sidebar-accent: #e9eef6;
+  --sidebar-accent-foreground: #1f3a61;
+  --radius: 0.5rem;
+
+  --st-todo: #8a8f9c;
+  --st-doing: #2b4c7e;
+  --st-blocked: #be4b31;
+  --st-done: #4a7c59;
+  --st-wont: #a9aab2;
+  --wikilink: #35618f;
+  --seal: #be4b31;
+  --daily: #7a557e;
+  --warn: #a8763e;
+  --over: #b3372a;
+}
+
+/* ============ 夜墨 ============ */
+.dark {
+  --background: #1f2228;
+  --foreground: #e8e6df;
+  --card: #23262d;
+  --card-foreground: #e8e6df;
+  --popover: #23262d;
+  --popover-foreground: #e8e6df;
+  --primary: #7fa3d4;
+  --primary-foreground: #10141b;
+  --secondary: #1a1d22;
+  --secondary-foreground: #c9cbd2;
+  --muted: #26292f;
+  --muted-foreground: #9ba0a9;
+  --accent: #2a3140;
+  --accent-foreground: #c9d8ec;
+  --destructive: #d97b62;
+  --destructive-foreground: #1a120e;
+  --border: #2c2f36;
+  --input: #2c2f36;
+  --ring: #7fa3d4;
+  --sidebar: #1a1d22;
+  --sidebar-foreground: #e8e6df;
+  --sidebar-accent: #2a3140;
+  --sidebar-accent-foreground: #c9d8ec;
+
+  --st-todo: #8a8f9c;
+  --st-doing: #7fa3d4;
+  --st-blocked: #d97b62;
+  --st-done: #7fab8c;
+  --st-wont: #7a7b83;
+  --wikilink: #8fb3de;
+  --seal: #d97b62;
+  --daily: #a983ad;
+  --warn: #c79a62;
+  --over: #d97b62;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    @apply font-sans;
+  }
+  body {
+    @apply bg-background text-foreground;
+    -webkit-font-smoothing: antialiased;
+  }
+  ::selection {
+    background: color-mix(in srgb, var(--primary) 22%, transparent);
+  }
+  ::-webkit-scrollbar {
+    width: 9px;
+    height: 9px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 9px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+/* ============ 笔记正文排版（阅读视图） ============ */
+.ink-doc {
+  line-height: 1.85;
+}
+
+/* ---- 块编辑模式 ---- */
+.ink-doc .ink-block {
+  border-radius: 8px;
+  padding: 2px 8px;
+  margin: 0 -8px;
+  cursor: text;
+  transition: background 0.12s ease;
+}
+.ink-doc .ink-block:hover {
+  background: color-mix(in srgb, var(--muted-foreground) 7%, transparent);
+}
+.ink-block-edit {
+  display: block;
+  width: 100%;
+  min-height: 2em;
+  resize: none;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--muted-foreground) 5%, transparent);
+  padding: 8px 10px;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1.8;
+  color: var(--foreground);
+  outline: none;
+  margin: 0.4rem 0;
+}
+.ink-block-edit:focus {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 3%, transparent);
+}
+.ink-doc h1 {
+  font-family: var(--font-serif);
+  font-size: 1.8rem;
+  font-weight: 700;
+  line-height: 1.3;
+  letter-spacing: 0.3px;
+  margin: 0 0 6px;
+}
+.ink-doc .sub-line {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted-foreground);
+  margin-bottom: 24px;
+}
+.ink-doc h2 {
+  font-family: var(--font-serif);
+  font-size: 1.2rem;
+  font-weight: 700;
+  margin: 2.1rem 0 0.6rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+}
+.ink-doc h3 {
+  font-size: 0.95rem;
+  font-weight: 700;
+  margin: 1.4rem 0 0.5rem;
+}
+.ink-doc h4 {
+  font-size: 0.9rem;
+  font-weight: 700;
+  margin: 1.1rem 0 0.4rem;
+}
+.ink-doc h5 {
+  font-size: 0.85rem;
+  font-weight: 700;
+  margin: 1rem 0 0.35rem;
+  color: var(--muted-foreground);
+}
+.ink-doc h6 {
+  font-size: 0.78rem;
+  font-weight: 700;
+  margin: 0.9rem 0 0.3rem;
+  color: var(--muted-foreground);
+  letter-spacing: 0.5px;
+}
+.ink-doc p {
+  font-size: 0.9rem;
+  margin: 0.6rem 0;
+}
+.ink-doc ul,
+.ink-doc ol {
+  list-style: none;
+  padding-left: 4px;
+  margin: 0.5rem 0;
+}
+.ink-doc li {
+  font-size: 0.9rem;
+  padding-left: 22px;
+  position: relative;
+  margin: 2px 0;
+}
+.ink-doc ul > li::before {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 0.78em;
+  width: 5px;
+  height: 5px;
+  border-radius: 50% 50% 50% 2px;
+  transform: rotate(45deg);
+  background: var(--muted-foreground);
+}
+.ink-doc ol {
+  counter-reset: oli;
+}
+.ink-doc ol > li {
+  counter-increment: oli;
+  padding-left: 30px;
+}
+.ink-doc ol > li::before {
+  content: counter(oli, decimal-leading-zero);
+  position: absolute;
+  left: 0;
+  top: 0.2em;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--primary);
+}
+.ink-doc blockquote {
+  margin: 0.9rem 0;
+  padding: 0.6rem 1rem;
+  border-left: 3px solid var(--primary);
+  background: color-mix(in srgb, var(--primary) 8%, transparent);
+  border-radius: 0 8px 8px 0;
+}
+.ink-doc blockquote p {
+  margin: 2px 0;
+  font-size: 0.85rem;
+  color: var(--muted-foreground);
+}
+.ink-doc pre {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1.7;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 13px 16px;
+  overflow-x: auto;
+  margin: 0.9rem 0;
+  color: var(--secondary-foreground);
+}
+.ink-doc code {
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+  background: var(--secondary);
+  border: 1px solid var(--border);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+.ink-doc pre code {
+  background: none;
+  border: none;
+  padding: 0;
+}
+/* GFM 表格：display:block 让宽表在自身范围内横向滚动，不撑破布局 */
+.ink-doc table {
+  display: block;
+  overflow-x: auto;
+  border-collapse: collapse;
+  margin: 0.9rem 0;
+  font-size: 0.84rem;
+  line-height: 1.6;
+}
+.ink-doc th,
+.ink-doc td {
+  border: 1px solid var(--border);
+  padding: 5px 12px;
+  white-space: nowrap;
+}
+.ink-doc th {
+  background: var(--secondary);
+  font-weight: 600;
+}
+.ink-doc tbody tr:nth-child(even) {
+  background: color-mix(in srgb, var(--muted) 45%, transparent);
+}
+.ink-doc td code {
+  white-space: inherit;
+}
+.ink-doc s,
+.ink-doc del {
+  opacity: 0.55;
+}
+.ink-doc a {
+  color: var(--wikilink);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--wikilink) 40%, transparent);
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.ink-doc hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1.6rem 0;
+}
+.ink-doc img.ink-img {
+  max-width: 100%;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  margin: 0.6rem 0;
+  display: block;
+}
+
+/* 双链 */
+.ink-wl {
+  color: var(--wikilink);
+  cursor: pointer;
+  border-bottom: 1px solid color-mix(in srgb, var(--wikilink) 30%, transparent);
+  border-radius: 2px;
+  transition: background 0.12s;
+}
+.ink-wl:hover {
+  background: color-mix(in srgb, var(--wikilink) 10%, transparent);
+}
+.ink-wl.unres {
+  color: var(--over);
+  border-bottom: 1px dashed var(--over);
+}
+
+/* 正文任务 */
+.ink-task {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 2px 0;
+}
+.ink-task input {
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  flex: none;
+  margin-top: 6px;
+  border: 1.5px solid var(--muted-foreground);
+  border-radius: 4px;
+  cursor: pointer;
+  position: relative;
+  transition: all 0.13s;
+}
+.ink-task input:hover {
+  border-color: var(--primary);
+}
+.ink-task input:checked {
+  background: var(--primary);
+  border-color: var(--primary);
+}
+.ink-task input:checked::after {
+  content: "";
+  position: absolute;
+  left: 4.5px;
+  top: 1.5px;
+  width: 4px;
+  height: 8px;
+  border: solid var(--primary-foreground);
+  border-width: 0 2px 2px 0;
+  transform: rotate(42deg);
+}
+.ink-task input:checked + .tl {
+  text-decoration: line-through;
+  text-decoration-color: var(--muted-foreground);
+  color: var(--muted-foreground);
+}
+.ink-task .tl {
+  font-size: 0.9rem;
+}
+.ink-task .ink-to-task {
+  display: none;
+  margin-left: 8px;
+  flex: none;
+  align-self: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0 8px;
+  font-size: 10px;
+  line-height: 16px;
+  color: var(--muted-foreground);
+  background: var(--card);
+  cursor: pointer;
+  font-family: var(--font-ui);
+}
+.ink-task:hover .ink-to-task {
+  display: inline-block;
+}
+.ink-task .ink-to-task:hover {
+  color: var(--primary);
+  border-color: var(--primary);
+}
+
+/* chips */
+.ink-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 17px;
+  border: 1px solid var(--border);
+  color: var(--muted-foreground);
+  background: var(--card);
+  white-space: nowrap;
+}
+
+/* 印章 */
+.ink-seal {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: 1.6px solid var(--seal);
+  color: var(--seal);
+  font-family: var(--font-serif);
+  font-size: 12px;
+  font-weight: 900;
+  border-radius: 4px;
+  transform: rotate(-8deg);
+  background: color-mix(in srgb, var(--seal) 6%, transparent);
+  user-select: none;
+}
+.ink-seal.anim {
+  animation: ink-stamp 0.34s cubic-bezier(0.3, 0.7, 0.4, 1);
+}
+@keyframes ink-stamp {
+  0% {
+    transform: rotate(-8deg) scale(2.1);
+    opacity: 0;
+  }
+  55% {
+    transform: rotate(-8deg) scale(0.92);
+    opacity: 1;
+  }
+  100% {
+    transform: rotate(-8deg) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
