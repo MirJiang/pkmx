@@ -2,7 +2,7 @@
 
 > 定位：**本地优先的笔记应用，主功能是笔记；待办便签 / 轻量 issues / 每日工作记录是同一数据模型上的视图**。
 > v3 要点（2026-10-14 定稿）：无类型系统、无 Git、无收件箱——组织方式参照 Obsidian（文件夹树 + 双链）；v1 方案中的类型/关系/项目/Git 章节已被本版取代。
-> 竞品证据（Obsidian 1.12.4 / Tolaria 2026.9.24 的 REA 逆向分析）见文末；原始证据包为第三方产物，未随仓库分发。
+> 竞品证据（Obsidian 1.12.4 / Tolaria 2026.9.24 的 REA 逆向分析）见文末；原始证据包为一次性分析产物，涉及第三方内容，未保留。
 
 ---
 
@@ -81,6 +81,6 @@ Tauri 2 · React 19 · Vite 8 · TypeScript 6 · Tailwind CSS 4 · shadcn/ui（r
 
 - **Obsidian 1.12.4**（Electron，asar 23MB）：内嵌 CodeMirror/PDF.js/MathJax/Mermaid/PixiJS 等；18 个核心插件经字节级 grep 验证；任务管理靠社区插件约定。→ 取其文件树+阅读视图形态。
 - **Tolaria 2026.9.24**（Tauri，34MB 单文件）：Markdown+frontmatter、status 属性+保存视图表达任务、内建 Git、随包 agent-docs 与 MCP（search/get/create/update/append 五工具，update 带 mtime 守卫）。→ 取"status+视图"与 MCP 设计，弃类型系统与 Git。
-- 完整证据包：`analysis/rea-evidence.json`（REA complete-record ×2，本地归档，未随仓库分发）。
+- 完整证据包（REA complete-record ×2）为一次性分析产物，涉及第三方内容，未保留。
 
 交互原型（HTML 参照稿）：`prototype/index.html`。实现代码：仓库根目录（Tauri 应用本体，2026-10-15 由 `inkwell/` 子目录提升而来）。
