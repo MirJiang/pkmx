@@ -54,7 +54,7 @@ due: 2026-10-16
     "args": ["--mcp", "--vault", "D:\\path\\vault"] } } }
 ```
 
-笔记工具：`search_notes` / `get_note`（含 mtime）/ `create_note` / `update_note`（mtime 守卫防读改写竞争）/ `append_to_note`。视图工具：`list_views` / `get_view` / `create_view` / `update_view` / `delete_view`。写入权限可在设置中分组开关。详见 [agent-docs/AGENTS.md](agent-docs/AGENTS.md)。
+笔记工具：`search_notes` / `get_note`（含毫秒级 mtime）/ `create_note` / `create_task`（任务 issue，写入默认文档地址）/ `update_note`（mtime 守卫防读改写竞争）/ `append_to_note` / `delete_note`（可选 mtime 守卫）。视图工具：`list_views` / `get_view` / `run_view`（执行视图，返回匹配任务）/ `create_view` / `update_view` / `delete_view`。写入与删除权限可在设置中分组开关。详见 [agent-docs/AGENTS.md](agent-docs/AGENTS.md)。
 
 ## 结构
 

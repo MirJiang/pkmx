@@ -161,7 +161,7 @@ export default function VaultDialog({
                           </IconBtn>
                         </>
                       )}
-                      <IconBtn title="从仓库列表中移除（不动磁盘文件）" danger onClick={() => removeRegisteredVault(r)}>
+                      <IconBtn title="从列表移除并卸载其文档（不动磁盘文件）" danger onClick={() => removeRegisteredVault(r)}>
                         <Trash2 size={14} strokeWidth={1.5} />
                       </IconBtn>
                     </div>

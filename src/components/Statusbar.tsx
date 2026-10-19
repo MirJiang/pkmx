@@ -1,4 +1,5 @@
 import { useStore, getVault } from "@/store";
+import { cn } from "@/lib/utils";
 
 const VIEW_LABEL: Record<string, string> = {
   note: "笔记",
@@ -13,6 +14,7 @@ const VIEW_LABEL: Record<string, string> = {
 
 export default function Statusbar() {
   const view = useStore((s) => s.view);
+  const needsVault = useStore((s) => s.needsVault);
   const notes = useStore((s) => s.notes);
   const open = notes.filter((n) => n.status && !["Done", "Wont"].includes(n.status)).length;
 
@@ -27,8 +29,12 @@ export default function Statusbar() {
           Ctrl+P 快速打开 · Ctrl+N 捕获 · Ctrl+\ 源码
         </span>
         <span className="flex items-center gap-1.5">
-          <span className="size-[6px] rounded-full bg-st-done" />
-          {getVault().kind === "fs" ? "本地文件仓库" : "内存仓库（不落盘）"}
+          <span className={cn("size-[6px] rounded-full", needsVault ? "bg-muted-foreground/50" : "bg-st-done")} />
+          {needsVault
+            ? "尚未选择文档目录"
+            : getVault().kind === "fs"
+              ? "本地文件仓库"
+              : "内存仓库（不落盘）"}
         </span>
       </div>
     </footer>

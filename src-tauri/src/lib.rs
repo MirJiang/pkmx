@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::mpsc;
 
+use chrono::{Datelike, Duration, Local, NaiveDate};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
@@ -481,6 +482,8 @@ struct McpPerms {
     update: bool,
     #[serde(default = "default_true")]
     append: bool,
+    #[serde(default = "default_true")]
+    delete: bool,
     /// 视图读取（list_views / get_view）
     #[serde(default = "default_true")]
     view_read: bool,
@@ -495,11 +498,11 @@ fn default_true() -> bool {
 
 impl Default for McpPerms {
     fn default() -> Self {
-        Self { create: true, update: true, append: true, view_read: true, view_write: true }
+        Self { create: true, update: true, append: true, delete: true, view_read: true, view_write: true }
     }
 }
 
-fn mcp_perms_path() -> Option<PathBuf> {
+fn user_config_dir() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     let base = std::env::var("APPDATA").ok().map(PathBuf::from);
     #[cfg(not(target_os = "windows"))]
@@ -507,7 +510,11 @@ fn mcp_perms_path() -> Option<PathBuf> {
         .ok()
         .map(PathBuf::from)
         .or_else(|| std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".config")));
-    base.map(|b| b.join("pkmx").join("mcp.json"))
+    base.map(|b| b.join("pkmx"))
+}
+
+fn mcp_perms_path() -> Option<PathBuf> {
+    user_config_dir().map(|b| b.join("mcp.json"))
 }
 
 fn load_mcp_perms() -> McpPerms {
@@ -537,6 +544,62 @@ fn mcp_set_perms(perms: McpPerms) -> Result<(), String> {
     save_mcp_perms(&perms)
 }
 
+/* ==================== 共享应用设置（GUI 与 --mcp 进程共用） ==================== */
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct AppSettings {
+    /// 仓库内相对目录，空串 = 根目录
+    #[serde(default)]
+    default_folder: String,
+}
+
+fn app_settings_path() -> Option<PathBuf> {
+    user_config_dir().map(|b| b.join("settings.json"))
+}
+
+/// 归一化仓库内相对目录；含 `..`、盘符等越界输入退回根目录
+fn normalize_rel_folder(input: &str) -> String {
+    let replaced = input.replace('\\', "/");
+    let segs: Vec<&str> = replaced
+        .split('/')
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != ".")
+        .collect();
+    if segs.iter().any(|s| *s == ".." || s.contains(':')) {
+        return String::new();
+    }
+    segs.join("/")
+}
+
+fn load_app_settings() -> AppSettings {
+    let Some(p) = app_settings_path() else { return AppSettings::default() };
+    let mut settings = fs::read_to_string(p)
+        .ok()
+        .and_then(|s| serde_json::from_str::<AppSettings>(&s).ok())
+        .unwrap_or_default();
+    settings.default_folder = normalize_rel_folder(&settings.default_folder);
+    settings
+}
+
+fn save_app_settings(settings: &AppSettings) -> Result<(), String> {
+    let Some(p) = app_settings_path() else { return Err("无法定位用户配置目录".into()) };
+    if let Some(dir) = p.parent() {
+        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let text = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
+    fs::write(p, text).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn app_get_default_folder() -> String {
+    load_app_settings().default_folder
+}
+
+#[tauri::command]
+fn app_set_default_folder(folder: String) -> Result<(), String> {
+    save_app_settings(&AppSettings { default_folder: normalize_rel_folder(&folder) })
+}
+
 /// 当前可执行文件绝对路径（设置页拼 MCP 接入配置用）
 #[tauri::command]
 fn app_exe_path() -> String {
@@ -546,13 +609,6 @@ fn app_exe_path() -> String {
 }
 
 /* ==================== MCP stdio 服务器（--mcp 模式） ==================== */
-
-fn mtime_secs(path: &Path) -> u64 {
-    fs::metadata(path)
-        .and_then(|m| m.modified())
-        .map(|t| t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0))
-        .unwrap_or(0)
-}
 
 /// 毫秒精度（秒级会在同秒内多次修改时漏同步）
 fn mtime_ms(path: &Path) -> u64 {
@@ -576,6 +632,193 @@ fn note_title(rel: &str, text: &str) -> String {
     }
     let f = rel.rsplit('/').next().unwrap_or(rel);
     f.trim_end_matches(".md").to_string()
+}
+
+fn not_found_msg(rel: &str, kind: &str) -> String {
+    if kind == "视图" {
+        format!("视图不存在：{rel}；可先用 list_views 查看已有视图")
+    } else {
+        format!("笔记不存在：{rel}；可先用 search_notes 查找正确路径")
+    }
+}
+
+fn ensure_file(path: &Path, rel: &str, kind: &str) -> Result<(), String> {
+    if !path.exists() {
+        return Err(not_found_msg(rel, kind));
+    }
+    if !path.is_file() {
+        return Err(format!("{kind}路径不是普通文件：{rel}"));
+    }
+    Ok(())
+}
+
+fn read_text_friendly(path: &Path, rel: &str, kind: &str) -> Result<String, String> {
+    ensure_file(path, rel, kind)?;
+    fs::read_to_string(path).map_err(|e| format!("读取{kind} {rel} 失败：{e}"))
+}
+
+fn task_file_stem(title: &str) -> String {
+    let cleaned: String = title
+        .chars()
+        .map(|c| match c {
+            '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .collect();
+    let trimmed = cleaned.trim().trim_matches('.').trim();
+    let stem: String = trimmed.chars().take(60).collect();
+    if stem.is_empty() { "未命名任务".into() } else { stem }
+}
+
+fn valid_due_date(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('-').collect();
+    if parts.len() != 3 || parts[0].len() != 4 || parts[1].len() != 2 || parts[2].len() != 2 {
+        return false;
+    }
+    let (Ok(y), Ok(m), Ok(d)) = (
+        parts[0].parse::<i32>(),
+        parts[1].parse::<u32>(),
+        parts[2].parse::<u32>(),
+    ) else {
+        return false;
+    };
+    if !(1..=12).contains(&m) {
+        return false;
+    }
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let days = match m {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    (1..=days).contains(&d)
+}
+
+fn validate_filter_list(value: &str, allowed: &[&str], field: &str) -> Result<(), String> {
+    let mut any = false;
+    for part in value.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        any = true;
+        if !allowed.contains(&part) {
+            return Err(format!(
+                "{field} 只能包含 {}（收到 {part}）",
+                allowed.join("/")
+            ));
+        }
+    }
+    if !any {
+        return Err(format!("{field} 不能为空"));
+    }
+    Ok(())
+}
+
+fn split_frontmatter(text: &str) -> (Option<&str>, &str) {
+    let Some(rest) = text.strip_prefix("---\r\n").or_else(|| text.strip_prefix("---\n")) else {
+        return (None, text);
+    };
+    let mut offset = 0;
+    for line in rest.split_inclusive('\n') {
+        let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
+        if trimmed == "---" {
+            return (Some(&rest[..offset]), &rest[offset + line.len()..]);
+        }
+        offset += line.len();
+    }
+    (None, text)
+}
+
+fn frontmatter_map(block: &str) -> HashMap<String, String> {
+    let mut meta = HashMap::new();
+    for line in block.lines() {
+        let Some((k, v)) = line.split_once(':') else { continue };
+        let v = v.trim().trim_matches('"').trim_matches('\'');
+        if !v.is_empty() {
+            meta.insert(k.trim().to_string(), v.to_string());
+        }
+    }
+    meta
+}
+
+/// 与前端 runView 行为对齐：只匹配带 status 的笔记，按状态/优先级/截止日期/文本过滤
+fn run_view_tasks(root: &str, filters: &Value, limit: usize) -> Vec<Value> {
+    let status_filter = filters.get("status").and_then(|v| v.as_str());
+    let priority_filter = filters.get("priority").and_then(|v| v.as_str());
+    let text_filter = filters.get("text").and_then(|v| v.as_str()).map(str::to_lowercase);
+    let due_filter = filters.get("due").and_then(|v| v.as_str()).unwrap_or("all");
+    let today = Local::now().date_naive();
+    let monday = today - Duration::days(today.weekday().num_days_from_monday() as i64);
+    let sunday = monday + Duration::days(6);
+    let today_str = today.format("%Y-%m-%d").to_string();
+
+    let mut tasks = Vec::new();
+    for rel in vault_files(root) {
+        let Ok(path) = safe_join(root, &rel) else { continue };
+        let Ok(text) = fs::read_to_string(&path) else { continue };
+        let (meta_text, body) = split_frontmatter(&text);
+        let meta = meta_text.map(frontmatter_map).unwrap_or_default();
+        let Some(status) = meta.get("status") else { continue };
+        if let Some(want) = status_filter {
+            if !want.split(',').map(str::trim).any(|s| s == status.as_str()) {
+                continue;
+            }
+        }
+        let priority = meta.get("priority").map(String::as_str);
+        if let Some(want) = priority_filter {
+            let Some(p) = priority else { continue };
+            if !want.split(',').map(str::trim).any(|s| s == p) {
+                continue;
+            }
+        }
+        if let Some(q) = &text_filter {
+            let haystack = format!("{}\n{}", note_title(&rel, &text), body).to_lowercase();
+            if !haystack.contains(q) {
+                continue;
+            }
+        }
+        let due = meta.get("due").map(String::as_str);
+        match due_filter {
+            "today" if due != Some(today_str.as_str()) => continue,
+            "overdue" => {
+                let Some(d) = due else { continue };
+                if d >= today_str.as_str() {
+                    continue;
+                }
+            }
+            "week" => {
+                let Some(d) = due.and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()) else {
+                    continue;
+                };
+                if d < monday || d > sunday {
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        let title = note_title(&rel, &text);
+        tasks.push(json!({
+            "rel": rel,
+            "title": title,
+            "status": status,
+            "priority": priority,
+            "due": due,
+            "mtime": mtime_ms(&path),
+        }));
+    }
+    tasks.sort_by(|a, b| {
+        let due_key = |v: &Value| match v["due"].as_str() {
+            Some(d) if !d.is_empty() => d.to_string(),
+            _ => "9999-99-99".to_string(),
+        };
+        due_key(a).cmp(&due_key(b)).then_with(|| {
+            a["title"]
+                .as_str()
+                .unwrap_or("")
+                .cmp(b["title"].as_str().unwrap_or(""))
+        })
+    });
+    tasks.truncate(limit);
+    tasks
 }
 
 // ---- 视图（views 目录下的 .yml，扁平键：name/status/priority/due/text） ----
@@ -614,6 +857,20 @@ fn render_view_yml(name: &str, args: &Value) -> Result<String, String> {
         if !["all", "today", "week", "overdue"].contains(&due.trim()) {
             return Err(format!("due 只能是 all/today/week/overdue（收到 {due}）"));
         }
+    }
+    if let Some(status) = args.get("status").and_then(|v| v.as_str()) {
+        validate_filter_list(
+            status,
+            &["Todo", "Doing", "Blocked", "Done", "Wont"],
+            "status",
+        )?;
+    }
+    if let Some(priority) = args.get("priority").and_then(|v| v.as_str()) {
+        validate_filter_list(
+            priority,
+            &["Low", "Normal", "High", "Urgent"],
+            "priority",
+        )?;
     }
     let mut lines = vec![format!("name: {name}")];
     for k in ["status", "priority", "due", "text"] {
@@ -676,22 +933,51 @@ fn mcp_tools() -> Value {
     );
     let update = tool(
         "update_note",
-        "整篇覆写笔记。可带 expected_mtime（unix 秒）做修改时间守卫，不匹配则拒绝并返回当前 mtime",
+        "整篇覆写笔记（笔记必须已存在，新建请用 create_note）。可带 expected_mtime（unix 毫秒，来自 get_note）做修改时间守卫，不匹配则拒绝并返回当前 mtime",
         json!({
             "rel": { "type": "string" },
             "content": { "type": "string" },
-            "expected_mtime": { "type": "integer", "description": "读取时获得的 mtime，防止读改写竞争" }
+            "expected_mtime": { "type": "integer", "description": "读取时获得的 mtime（unix 毫秒），防止读改写竞争" }
         }),
         &["rel", "content"],
     );
+    let create_task = tool(
+        "create_task",
+        "创建任务（issue）笔记：写入设置中的默认文档地址，自动生成 status/priority/due frontmatter；同名文件自动加 -2 后缀",
+        json!({
+            "title": { "type": "string", "description": "任务标题，同时作为文件名" },
+            "body": { "type": "string", "description": "正文（可选），会自动补一级标题" },
+            "status": {
+                "type": "string",
+                "enum": ["Todo", "Doing", "Blocked", "Done", "Wont"],
+                "description": "任务状态，默认 Todo"
+            },
+            "priority": {
+                "type": "string",
+                "enum": ["Low", "Normal", "High", "Urgent"],
+                "description": "优先级，默认 Normal"
+            },
+            "due": { "type": "string", "description": "截止日期 YYYY-MM-DD（可选）" }
+        }),
+        &["title"],
+    );
     let append = tool(
         "append_to_note",
-        "在笔记末尾追加内容",
+        "在笔记末尾追加内容（笔记必须已存在）",
         json!({
             "rel": { "type": "string" },
             "content": { "type": "string" }
         }),
         &["rel", "content"],
+    );
+    let delete = tool(
+        "delete_note",
+        "删除一篇笔记（不可恢复）。可带 expected_mtime（unix 毫秒，来自 get_note）守卫，防止误删已被修改的笔记",
+        json!({
+            "rel": { "type": "string" },
+            "expected_mtime": { "type": "integer", "description": "可选 mtime 守卫（unix 毫秒）" }
+        }),
+        &["rel"],
     );
     let view_filters = json!({
         "name": { "type": "string", "description": "视图名（文件名与显示名）" },
@@ -710,6 +996,15 @@ fn mcp_tools() -> Value {
         "get_view",
         "读取一个视图的原始 yml 与解析后的过滤条件",
         json!({ "rel": { "type": "string", "description": "如 views/进行中.yml" } }),
+        &["rel"],
+    );
+    let vrun = tool(
+        "run_view",
+        "运行保存视图，返回匹配的任务（带 status 的笔记）：状态/优先级/截止日期/文本过滤与界面一致",
+        json!({
+            "rel": { "type": "string", "description": "如 views/进行中.yml" },
+            "limit": { "type": "integer", "description": "最多返回条数，默认 100" }
+        }),
         &["rel"],
     );
     let vcreate = tool(
@@ -742,10 +1037,13 @@ fn mcp_tools() -> Value {
         search,
         get,
         mark(create, perms.create),
+        mark(create_task, perms.create),
         mark(update, perms.update),
         mark(append, perms.append),
+        mark(delete, perms.delete),
         mark(vlist, perms.view_read),
         mark(vget, perms.view_read),
+        mark(vrun, perms.view_read),
         mark(vcreate, perms.view_write),
         mark(vupdate, perms.view_write),
         mark(vdelete, perms.view_write)
@@ -778,8 +1076,8 @@ fn mcp_call(name: &str, root: &str, args: &Value) -> Result<Value, String> {
             let rel = args["rel"].as_str().ok_or("rel required")?;
             note_rel(rel)?;
             let path = safe_join(root, rel)?;
-            let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-            Ok(json!({ "rel": rel, "title": note_title(rel, &text), "mtime": mtime_secs(&path), "content": text }))
+            let text = read_text_friendly(&path, rel, "笔记")?;
+            Ok(json!({ "rel": rel, "title": note_title(rel, &text), "mtime": mtime_ms(&path), "content": text }))
         }
         "create_note" => {
             if !perms.create {
@@ -798,6 +1096,81 @@ fn mcp_call(name: &str, root: &str, args: &Value) -> Result<Value, String> {
             fs::write(&path, content).map_err(|e| e.to_string())?;
             Ok(json!({ "rel": rel, "created": true }))
         }
+        "create_task" => {
+            if !perms.create {
+                return Err("权限拒绝：create_task 已在 PKMX 设置（MCP 权限）中禁用".into());
+            }
+            let title = args["title"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or("title required")?;
+            if title.contains(['\n', '\r']) {
+                return Err("title 不能包含换行".into());
+            }
+            let status = args["status"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("Todo");
+            if !["Todo", "Doing", "Blocked", "Done", "Wont"].contains(&status) {
+                return Err(format!(
+                    "status 只能是 Todo/Doing/Blocked/Done/Wont（收到 {status}）"
+                ));
+            }
+            let priority = args["priority"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("Normal");
+            if !["Low", "Normal", "High", "Urgent"].contains(&priority) {
+                return Err(format!(
+                    "priority 只能是 Low/Normal/High/Urgent（收到 {priority}）"
+                ));
+            }
+            let due = args["due"].as_str().map(str::trim).filter(|s| !s.is_empty());
+            if let Some(d) = due {
+                if !valid_due_date(d) {
+                    return Err(format!("due 必须是 YYYY-MM-DD 日期（收到 {d}）"));
+                }
+            }
+            let folder = load_app_settings().default_folder;
+            let stem = task_file_stem(title);
+            let mut name = format!("{stem}.md");
+            let mut rel = if folder.is_empty() { name.clone() } else { format!("{folder}/{name}") };
+            let mut n = 2;
+            while safe_join(root, &rel)?.exists() {
+                name = format!("{stem}-{n}.md");
+                rel = if folder.is_empty() { name.clone() } else { format!("{folder}/{name}") };
+                n += 1;
+                if n > 1000 {
+                    return Err(format!("同名任务过多，无法为《{title}》生成文件名"));
+                }
+            }
+            let body = args["body"].as_str().unwrap_or("").trim();
+            let mut content = format!("---\nstatus: {status}\npriority: {priority}\n");
+            if let Some(d) = due {
+                content.push_str(&format!("due: {d}\n"));
+            }
+            content.push_str(&format!("---\n\n# {title}\n"));
+            if !body.is_empty() {
+                content.push_str(&format!("\n{body}\n"));
+            }
+            let path = safe_join(root, &rel)?;
+            if let Some(p) = path.parent() {
+                fs::create_dir_all(p).map_err(|e| format!("创建默认文档目录失败：{e}"))?;
+            }
+            fs::write(&path, &content).map_err(|e| format!("创建任务 {rel} 失败：{e}"))?;
+            Ok(json!({
+                "rel": rel,
+                "title": title,
+                "status": status,
+                "priority": priority,
+                "due": due,
+                "folder": folder,
+                "mtime": mtime_ms(&path),
+            }))
+        }
         "update_note" => {
             if !perms.update {
                 return Err("权限拒绝：update_note 已在 PKMX 设置（MCP 权限）中禁用".into());
@@ -806,14 +1179,15 @@ fn mcp_call(name: &str, root: &str, args: &Value) -> Result<Value, String> {
             note_rel(rel)?;
             let content = args["content"].as_str().unwrap_or("");
             let path = safe_join(root, rel)?;
+            ensure_file(&path, rel, "笔记")?;
             if let Some(exp) = args["expected_mtime"].as_u64() {
-                let cur = mtime_secs(&path);
+                let cur = mtime_ms(&path);
                 if cur != exp {
-                    return Err(format!("mtime 不匹配：文件已被其他方修改（当前 {cur}，期望 {exp}）。请重新 get_note"));
+                    return Err(format!("mtime 不匹配：笔记已被其他方修改（当前 {cur}，期望 {exp}，unix 毫秒）。请重新 get_note"));
                 }
             }
-            fs::write(&path, content).map_err(|e| e.to_string())?;
-            Ok(json!({ "rel": rel, "updated": true, "mtime": mtime_secs(&path) }))
+            fs::write(&path, content).map_err(|e| format!("写入笔记 {rel} 失败：{e}"))?;
+            Ok(json!({ "rel": rel, "updated": true, "mtime": mtime_ms(&path) }))
         }
         "append_to_note" => {
             if !perms.append {
@@ -823,13 +1197,30 @@ fn mcp_call(name: &str, root: &str, args: &Value) -> Result<Value, String> {
             note_rel(rel)?;
             let content = args["content"].as_str().unwrap_or("");
             let path = safe_join(root, rel)?;
-            let mut text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            let mut text = read_text_friendly(&path, rel, "笔记")?;
             if !text.ends_with('\n') {
                 text.push('\n');
             }
             text.push_str(content);
-            fs::write(&path, &text).map_err(|e| e.to_string())?;
+            fs::write(&path, &text).map_err(|e| format!("写入笔记 {rel} 失败：{e}"))?;
             Ok(json!({ "rel": rel, "appended": true }))
+        }
+        "delete_note" => {
+            if !perms.delete {
+                return Err("权限拒绝：delete_note 已在 PKMX 设置（MCP 权限）中禁用".into());
+            }
+            let rel = args["rel"].as_str().ok_or("rel required")?;
+            note_rel(rel)?;
+            let path = safe_join(root, rel)?;
+            ensure_file(&path, rel, "笔记")?;
+            if let Some(exp) = args["expected_mtime"].as_u64() {
+                let cur = mtime_ms(&path);
+                if cur != exp {
+                    return Err(format!("mtime 不匹配：笔记已被其他方修改（当前 {cur}，期望 {exp}，unix 毫秒）。请重新 get_note"));
+                }
+            }
+            fs::remove_file(&path).map_err(|e| format!("删除笔记 {rel} 失败：{e}"))?;
+            Ok(json!({ "rel": rel, "deleted": true }))
         }
         "list_views" => {
             if !perms.view_read {
@@ -849,7 +1240,7 @@ fn mcp_call(name: &str, root: &str, args: &Value) -> Result<Value, String> {
                         "rel": format!("views/{fname}"),
                         "name": display,
                         "filters": filters,
-                        "mtime": mtime_secs(&e.path()),
+                        "mtime": mtime_ms(&e.path()),
                     }));
                 }
             }
@@ -863,9 +1254,28 @@ fn mcp_call(name: &str, root: &str, args: &Value) -> Result<Value, String> {
             let rel = args["rel"].as_str().ok_or("rel required")?;
             view_rel_check(rel)?;
             let path = safe_join(root, rel)?;
-            let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            let text = read_text_friendly(&path, rel, "视图")?;
             let (vname, filters) = parse_view_yml(&text);
-            Ok(json!({ "rel": rel, "name": vname, "filters": filters, "mtime": mtime_secs(&path), "content": text }))
+            Ok(json!({ "rel": rel, "name": vname, "filters": filters, "mtime": mtime_ms(&path), "content": text }))
+        }
+        "run_view" => {
+            if !perms.view_read {
+                return Err("权限拒绝：run_view 已在 PKMX 设置（MCP 权限 → 视图）中禁用".into());
+            }
+            let rel = args["rel"].as_str().ok_or("rel required")?;
+            view_rel_check(rel)?;
+            let path = safe_join(root, rel)?;
+            let text = read_text_friendly(&path, rel, "视图")?;
+            let (vname, filters) = parse_view_yml(&text);
+            let limit = args["limit"].as_u64().unwrap_or(100) as usize;
+            let tasks = run_view_tasks(root, &filters, limit);
+            Ok(json!({
+                "rel": rel,
+                "name": vname,
+                "filters": filters,
+                "count": tasks.len(),
+                "tasks": tasks,
+            }))
         }
         "create_view" => {
             if !perms.view_write {
@@ -895,16 +1305,14 @@ fn mcp_call(name: &str, root: &str, args: &Value) -> Result<Value, String> {
             let rel = args["rel"].as_str().ok_or("rel required")?;
             view_rel_check(rel)?;
             let path = safe_join(root, rel)?;
-            if !path.exists() {
-                return Err(format!("{rel} 不存在"));
-            }
+            ensure_file(&path, rel, "视图")?;
             if let Some(exp) = args["expected_mtime"].as_u64() {
-                let cur = mtime_secs(&path);
+                let cur = mtime_ms(&path);
                 if cur != exp {
-                    return Err(format!("mtime 不匹配：视图已被其他方修改（当前 {cur}，期望 {exp}）。请重新 get_view"));
+                    return Err(format!("mtime 不匹配：视图已被其他方修改（当前 {cur}，期望 {exp}，unix 毫秒）。请重新 get_view"));
                 }
             }
-            let old = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            let old = read_text_friendly(&path, rel, "视图")?;
             let (old_name, _) = parse_view_yml(&old);
             let name = args["name"]
                 .as_str()
@@ -912,8 +1320,8 @@ fn mcp_call(name: &str, root: &str, args: &Value) -> Result<Value, String> {
                 .filter(|s| !s.is_empty())
                 .unwrap_or(&old_name);
             let yml = render_view_yml(name, args)?;
-            fs::write(&path, yml).map_err(|e| e.to_string())?;
-            Ok(json!({ "rel": rel, "updated": true, "mtime": mtime_secs(&path) }))
+            fs::write(&path, yml).map_err(|e| format!("写入视图 {rel} 失败：{e}"))?;
+            Ok(json!({ "rel": rel, "updated": true, "mtime": mtime_ms(&path) }))
         }
         "delete_view" => {
             if !perms.view_write {
@@ -922,16 +1330,14 @@ fn mcp_call(name: &str, root: &str, args: &Value) -> Result<Value, String> {
             let rel = args["rel"].as_str().ok_or("rel required")?;
             view_rel_check(rel)?;
             let path = safe_join(root, rel)?;
-            if !path.exists() {
-                return Err(format!("{rel} 不存在"));
-            }
+            ensure_file(&path, rel, "视图")?;
             if let Some(exp) = args["expected_mtime"].as_u64() {
-                let cur = mtime_secs(&path);
+                let cur = mtime_ms(&path);
                 if cur != exp {
-                    return Err(format!("mtime 不匹配：视图已被其他方修改（当前 {cur}，期望 {exp}）"));
+                    return Err(format!("mtime 不匹配：视图已被其他方修改（当前 {cur}，期望 {exp}，unix 毫秒）"));
                 }
             }
-            fs::remove_file(&path).map_err(|e| e.to_string())?;
+            fs::remove_file(&path).map_err(|e| format!("删除视图 {rel} 失败：{e}"))?;
             Ok(json!({ "rel": rel, "deleted": true }))
         }
         other => Err(format!("未知工具 {other}")),
@@ -1031,6 +1437,8 @@ pub fn run(vault_arg: Option<String>) {
             initial_vault,
             mcp_get_perms,
             mcp_set_perms,
+            app_get_default_folder,
+            app_set_default_folder,
             app_exe_path,
             path_is_dir
         ])

@@ -54,7 +54,7 @@ created: 2026-10-01
 
 **弹窗与危险操作**：所有弹窗（捕获/快速打开/输入/确认）在窗口正中弹出；删除任何本地文件（笔记或办公文档）前弹居中确认对话框（红字"删除"，Enter 确认 / Esc 取消），文案明示"将删除本地文件，不可恢复"。
 
-**开放（M4）**：`pkmx.exe --mcp --vault <dir>` 即 MCP stdio 服务器——search_notes / get_note / create_note / update_note（mtime 守卫）/ append_to_note；agent-docs 随仓库提供。
+**开放（M4）**：`pkmx.exe --mcp --vault <dir>` 即 MCP stdio 服务器——search_notes / get_note / create_note / create_task（写入默认文档地址）/ update_note（mtime 守卫）/ append_to_note / delete_note，以及视图工具 list_views / get_view / run_view / create_view / update_view / delete_view；agent-docs 随仓库提供。
 
 **桌面**：文件监听（外部编辑实时同步，写入回声过滤，每仓库独立 watcher）/ **多仓库同时加载**（文件树「打开文件夹…」或拖入文件夹合并其他仓库进文件树，独立读写与监听）/ 昼白·夜墨双主题 / 错误边界 / `--vault <dir>` 启动直开。
 

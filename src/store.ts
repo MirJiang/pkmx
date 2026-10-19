@@ -286,6 +286,8 @@ function startWatcher(root: string) {
     void import("@tauri-apps/api/event").then(({ listen }) => {
       void listen<{ root: string; rel: string; kind: string }>("vault-fs-event", (ev) => {
         const { root, rel, kind } = ev.payload;
+        // 仓库已卸载/移除：Rust 侧 watcher 仍在，但事件不再回流到文件树
+        if (root !== primaryRoot && !extraVaults.has(root)) return;
         const key = root === primaryRoot ? rel : `${vaultNameOf(root)}::${rel}`;
         const prev = pendingFs.get(key);
         if (prev) clearTimeout(prev);
@@ -293,6 +295,7 @@ function startWatcher(root: string) {
           key,
           window.setTimeout(async () => {
             pendingFs.delete(key);
+            if (root !== primaryRoot && !extraVaults.has(root)) return; // 去抖窗口内仓库已被移除
             if (kind === "remove") {
               useStore.setState((s) => ({
                 notes: s.notes.filter((n) => n.id !== key),
@@ -550,6 +553,19 @@ export const useStore = create<AppState>((set, get) => ({
       set({ ready: true });
       return;
     }
+    // 默认文档地址由 GUI 与 MCP 共用：以共享配置为准，旧版本只有 localStorage 时迁移过去
+    try {
+      const central = normalizeFolder(await invoke<string>("app_get_default_folder"));
+      if (central) {
+        localStorage.setItem(DEFAULT_FOLDER_KEY, central);
+        set({ defaultFolder: central });
+      } else {
+        const local = loadDefaultFolder();
+        if (local) await invoke("app_set_default_folder", { folder: local });
+      }
+    } catch {
+      /* 命令不可用时沿用 localStorage */
+    }
     const saved = localStorage.getItem("pkmx.vault.root");
     if (saved) {
       try {
@@ -709,11 +725,25 @@ export const useStore = create<AppState>((set, get) => ({
     const name = extraVaults.get(root);
     if (!name) return;
     extraVaults.delete(root);
-    watchedRoots.delete(root);
-    set((s) => ({
-      notes: s.notes.filter((n) => n.vaultRoot !== root),
-      loadedVaults: s.loadedVaults.filter((r) => r !== root),
-    }));
+    // 保留 watchedRoots：Rust 侧 watcher 无法注销，删掉会导致重新加载时重复注册
+    if (vaultOnly.delete(root)) saveExternalFiles();
+    const viewPrefix = `views/${name}__`;
+    set((s) => {
+      const notes = s.notes.filter((n) => n.vaultRoot !== root);
+      const views = s.views.filter((v) => !v.id.startsWith(viewPrefix));
+      const viewId = views.some((v) => v.id === s.viewId) ? s.viewId : null;
+      return {
+        notes,
+        views,
+        viewId,
+        view: s.view === "saved" && !viewId ? "due" : s.view,
+        activeId: notes.some((n) => n.id === s.activeId) ? s.activeId : notes[0]?.id ?? null,
+        openFolders: Object.fromEntries(
+          Object.entries(s.openFolders).filter(([k]) => k !== name && !k.startsWith(`${name}/`)),
+        ),
+        loadedVaults: s.loadedVaults.filter((r) => r !== root),
+      };
+    });
     saveLoadedVaults(get().loadedVaults);
     toast(`已卸载仓库 ${name}（文件保留在磁盘）`);
   },
@@ -721,8 +751,57 @@ export const useStore = create<AppState>((set, get) => ({
   removeRegisteredVault(root) {
     const list = loadRegistered().filter((r) => r !== root);
     saveRegistered(list);
-    set({ registeredVaults: list });
-    if (localStorage.getItem("pkmx.vault.root") === root) localStorage.removeItem("pkmx.vault.root");
+    const name = vaultNameOf(root);
+    const isPrimary = root === primaryRoot;
+    const isExtra = extraVaults.has(root);
+
+    if (isExtra) {
+      extraVaults.delete(root);
+      vaultOnly.delete(root);
+      fsVaultCache.delete(root);
+      saveExternalFiles();
+    }
+    if (isPrimary) {
+      // 移除当前主仓库：连同同时加载的仓库一起关闭，回到选择仓库界面（磁盘文件不动）
+      primaryRoot = null;
+      localStorage.removeItem("pkmx.vault.root");
+      localStorage.removeItem(LOADED_KEY);
+      localStorage.removeItem(EXTFILES_KEY);
+      extraVaults.clear();
+      vaultOnly.clear();
+      fsVaultCache.clear();
+      repo = new MemoryVault();
+    }
+
+    if (!isPrimary && !isExtra) {
+      set({ registeredVaults: list });
+      toast(`已从仓库列表移除 ${name}（磁盘文件未改动）`);
+      return;
+    }
+
+    const viewPrefix = `views/${name}__`;
+    set((s) => {
+      const notes = isPrimary ? [] : s.notes.filter((n) => n.vaultRoot !== root);
+      const views = isPrimary ? [] : s.views.filter((v) => !v.id.startsWith(viewPrefix));
+      const viewId = views.some((v) => v.id === s.viewId) ? s.viewId : null;
+      return {
+        registeredVaults: list,
+        notes,
+        views,
+        viewId,
+        view: isPrimary ? (s.view === "settings" ? "settings" : "note") : s.view === "saved" && !viewId ? "due" : s.view,
+        activeId: notes.some((n) => n.id === s.activeId) ? s.activeId : notes[0]?.id ?? null,
+        openFolders: isPrimary
+          ? {}
+          : Object.fromEntries(
+              Object.entries(s.openFolders).filter(([k]) => k !== name && !k.startsWith(`${name}/`)),
+            ),
+        loadedVaults: isPrimary ? [] : s.loadedVaults.filter((r) => r !== root),
+        needsVault: isPrimary ? true : s.needsVault,
+      };
+    });
+    saveLoadedVaults(get().loadedVaults);
+    toast.success(`已移除仓库 ${name}，对应文档已从文件树移除（磁盘文件未改动）`);
   },
 
   setDefaultFolder(folder) {
@@ -730,6 +809,11 @@ export const useStore = create<AppState>((set, get) => ({
     if (dir) localStorage.setItem(DEFAULT_FOLDER_KEY, dir);
     else localStorage.removeItem(DEFAULT_FOLDER_KEY);
     set({ defaultFolder: dir });
+    if (isTauri()) {
+      void invoke("app_set_default_folder", { folder: dir }).catch((e) =>
+        toast.error("保存默认文档地址失败", { description: String(e) }),
+      );
+    }
   },
 
   forgetExternalFile(id) {

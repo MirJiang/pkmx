@@ -194,12 +194,13 @@ export default function App() {
       <Titlebar />
       {/* min-w-0 必须有：grid 子项默认 min-width:auto，超宽内容（如 xlsx 表格）会把整个布局顶开 */}
       <div className="flex min-h-0 min-w-0">
-        <Sidebar />
+        {/* 未选择仓库时隐藏侧栏，让欢迎引导独占内容区（设置仍可从顶栏打开） */}
+        {!needsVault && <Sidebar />}
         <main className="flex min-w-0 flex-1">
-          {/* 设置与只读视图不依赖仓库，未选仓库时也要能打开；只有笔记/每日笔记必须落在仓库里 */}
+          {/* 设置不依赖仓库；其余界面在未选仓库时统一显示欢迎引导 */}
           {view === "settings" ? (
             <SettingsView />
-          ) : needsVault && (view === "note" || view === "daily") ? (
+          ) : needsVault ? (
             <VaultGate />
           ) : view === "daily" ? (
             <DailyView />

@@ -1,10 +1,10 @@
 /**
  * tantivy 索引端到端测试：经 MCP stdio 实测（node scripts/test-mcp.mjs <exe路径>）
  * 覆盖：中英文搜索排序、多词 AND、标题命中、外部增/改/删的增量同步、
- *       单字符回退扫描、update_note mtime 守卫回归。
+ *       单字符回退扫描、毫秒级 mtime 守卫、缺失文件友好错误、delete_note。
  */
 import { spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync, unlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync, unlinkSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -106,11 +106,48 @@ const bad = await call("tools/call", {
   arguments: { rel: "量化策略.md", content: "x", expected_mtime: note.mtime - 9999 },
 });
 assert(bad.result.isError === true, "过期 mtime 被拒绝");
+assert(note.mtime > 1_500_000_000_000, "mtime 为 unix 毫秒精度");
 const good = await call("tools/call", {
   name: "update_note",
   arguments: { rel: "量化策略.md", content: note.content, expected_mtime: note.mtime },
 });
 assert(good.result.isError !== true, "正确 mtime 通过");
+await new Promise((r) => setTimeout(r, 20));
+const stale = await call("tools/call", {
+  name: "update_note",
+  arguments: { rel: "量化策略.md", content: note.content, expected_mtime: note.mtime },
+});
+assert(stale.result.isError === true, "同秒内再次修改时旧 mtime 被拒绝（毫秒精度）");
+
+const callTool = (name, args) => call("tools/call", { name, arguments: args });
+
+console.log("== 缺失文件友好错误 ==");
+let missing = await callTool("get_note", { rel: "不存在.md" });
+assert(missing.result.isError === true && missing.result.content[0].text.includes("笔记不存在"), "get_note 缺失返回“笔记不存在”");
+assert(missing.result.content[0].text.includes("search_notes"), "错误信息给出 search_notes 提示");
+missing = await callTool("update_note", { rel: "缺失.md", content: "x" });
+assert(missing.result.isError === true && missing.result.content[0].text.includes("笔记不存在"), "update_note 缺失返回“笔记不存在”");
+assert(!existsSync(join(vault, "缺失.md")), "update_note 不会隐式创建缺失文件");
+missing = await callTool("append_to_note", { rel: "缺失.md", content: "x" });
+assert(missing.result.isError === true && missing.result.content[0].text.includes("笔记不存在"), "append_to_note 缺失返回“笔记不存在”");
+missing = await callTool("delete_note", { rel: "缺失.md" });
+assert(missing.result.isError === true && missing.result.content[0].text.includes("笔记不存在"), "delete_note 缺失返回“笔记不存在”");
+
+console.log("== delete_note ==");
+writeFileSync(join(vault, "待删除.md"), "# 待删除\n\n临时内容。\n");
+const delNote = JSON.parse((await callTool("get_note", { rel: "待删除.md" })).result.content[0].text);
+let del = await callTool("delete_note", { rel: "待删除.md", expected_mtime: delNote.mtime - 1 });
+assert(del.result.isError === true && del.result.content[0].text.includes("mtime 不匹配"), "错误 mtime 阻止删除");
+assert(existsSync(join(vault, "待删除.md")), "守卫失败时文件仍在");
+del = await callTool("delete_note", { rel: "待删除.md", expected_mtime: delNote.mtime });
+assert(del.result.isError !== true, "正确 mtime 删除成功");
+assert(!existsSync(join(vault, "待删除.md")), "文件已从磁盘删除");
+r = await search("待删除");
+assert(r.count === 0, "删除后搜索不再命中");
+r = await callTool("get_note", { rel: "待删除.md" });
+assert(r.result.isError === true && r.result.content[0].text.includes("笔记不存在"), "删除后 get_note 返回友好错误");
+r = await callTool("delete_note", { rel: "views/x.yml" });
+assert(r.result.isError === true && r.result.content[0].text.includes("视图工具"), "delete_note 拒绝视图路径");
 
 child.kill();
 rmSync(vault, { recursive: true, force: true });
