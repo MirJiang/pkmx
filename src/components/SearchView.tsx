@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { FileText } from "lucide-react";
 import { useStore, searchVaults } from "@/store";
-import { StatusChip } from "./Chips";
 
 function Highlight({ text, query }: { text: string; query: string }) {
   const q = query.trim();
@@ -87,7 +86,6 @@ export default function SearchView() {
             <div className="mb-1 flex items-center gap-2 text-sm font-medium">
               <FileText size={13} strokeWidth={1.3} className="shrink-0 text-muted-foreground" />
               <span className="min-w-0 flex-1 truncate">{note.title}</span>
-              {note.status && <StatusChip s={note.status} />}
               <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
                 {note.vaultName ? `${note.vaultName}/` : ""}
                 {note.fileName}

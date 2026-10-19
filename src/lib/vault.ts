@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { isDocFile } from "./office";
+import type { Issue, IssueSnapshot } from "./types";
 
 export interface RawNoteFile {
   relPath: string;
@@ -16,6 +17,9 @@ export interface VaultRepo {
   writeBin(relPath: string, dataUrl: string): Promise<void>;
   /** 读取附件为 dataURL */
   readBin(relPath: string): Promise<string>;
+  /** Issue 独立存储（.pkmx/issues.json）；首次加载可能触发旧任务迁移 */
+  loadIssues(): Promise<IssueSnapshot>;
+  saveIssues(issues: Issue[]): Promise<number>;
 }
 
 export const isTauri = (): boolean =>
@@ -34,9 +38,19 @@ export class MemoryVault implements VaultRepo {
   rootName = "内存仓库";
   private files = new Map<string, string>();
   private bins = new Map<string, string>();
+  private issues: Issue[] = [];
 
   async loadAll(): Promise<RawNoteFile[]> {
     return [...this.files.entries()].map(([relPath, text]) => ({ relPath, text }));
+  }
+
+  async loadIssues(): Promise<IssueSnapshot> {
+    return { issues: this.issues, mtime: 0, migrated: [], removed: [] };
+  }
+
+  async saveIssues(issues: Issue[]): Promise<number> {
+    this.issues = issues;
+    return 0;
   }
   async write(relPath: string, text: string): Promise<void> {
     this.files.set(relPath, text);
@@ -97,5 +111,13 @@ export class FsVault implements VaultRepo {
   async readBin(relPath: string): Promise<string> {
     const b64 = await invoke<string>("vault_read_bin", { root: this.root, rel: relPath });
     return b64ToDataUrl(b64, relPath);
+  }
+
+  async loadIssues(): Promise<IssueSnapshot> {
+    return invoke<IssueSnapshot>("vault_issues_load", { root: this.root });
+  }
+
+  async saveIssues(issues: Issue[]): Promise<number> {
+    return invoke<number>("vault_issues_save", { root: this.root, issues });
   }
 }

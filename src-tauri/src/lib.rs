@@ -1,8 +1,11 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -469,6 +472,46 @@ fn vault_search(root: String, query: String, limit: Option<usize>) -> Result<Vec
     indexed_search(&root, &query, limit.unwrap_or(50))
 }
 
+#[tauri::command]
+fn vault_issues_load(root: String) -> Result<Value, String> {
+    let loaded = load_issues(&root)?;
+    Ok(json!({
+        "issues": loaded.store.issues,
+        "mtime": loaded.mtime,
+        "created": loaded.created,
+        "migrated": loaded.migrated,
+        "removed": loaded.removed,
+    }))
+}
+
+#[tauri::command]
+fn vault_issues_save(root: String, issues: Vec<Issue>) -> Result<u64, String> {
+    let mut ids = HashSet::new();
+    for issue in &issues {
+        if issue.id.trim().is_empty() {
+            return Err("Issue id 不能为空".into());
+        }
+        if !ids.insert(issue.id.as_str()) {
+            return Err(format!("Issue id 重复：{}", issue.id));
+        }
+        if issue.title.trim().is_empty() {
+            return Err(format!("Issue {} 的标题不能为空", issue.id));
+        }
+        if !ISSUE_STATUSES.contains(&issue.status.as_str()) {
+            return Err(format!("Issue {} 的状态非法：{}", issue.id, issue.status));
+        }
+        if !ISSUE_PRIORITIES.contains(&issue.priority.as_str()) {
+            return Err(format!("Issue {} 的优先级非法：{}", issue.id, issue.priority));
+        }
+        if let Some(due) = issue.due.as_deref() {
+            if !valid_due_date(due) {
+                return Err(format!("Issue {} 的截止日期非法：{due}", issue.id));
+            }
+        }
+    }
+    write_issue_store(&root, &IssueStore { version: issue_store_version(), issues })
+}
+
 /* ==================== MCP 写入权限（GUI 与 --mcp 进程共享） ====================
  * 存放于用户配置目录 pkmx/mcp.json；默认全部允许，MCP 服务端每次调用重读，
  * GUI 里改动即时生效，无需重启 --mcp 进程。
@@ -484,12 +527,18 @@ struct McpPerms {
     append: bool,
     #[serde(default = "default_true")]
     delete: bool,
-    /// 视图读取（list_views / get_view）
+    /// 视图读取（list_views / get_view / run_view）
     #[serde(default = "default_true")]
     view_read: bool,
     /// 视图管理（create_view / update_view / delete_view）
     #[serde(default = "default_true")]
     view_write: bool,
+    /// Issue 读取（list_issues / get_issue）
+    #[serde(default = "default_true")]
+    issue_read: bool,
+    /// Issue 管理（create_issue / create_task / update_issue / delete_issue）
+    #[serde(default = "default_true")]
+    issue_write: bool,
 }
 
 fn default_true() -> bool {
@@ -498,7 +547,16 @@ fn default_true() -> bool {
 
 impl Default for McpPerms {
     fn default() -> Self {
-        Self { create: true, update: true, append: true, delete: true, view_read: true, view_write: true }
+        Self {
+            create: true,
+            update: true,
+            append: true,
+            delete: true,
+            view_read: true,
+            view_write: true,
+            issue_read: true,
+            issue_write: true,
+        }
     }
 }
 
@@ -657,20 +715,6 @@ fn read_text_friendly(path: &Path, rel: &str, kind: &str) -> Result<String, Stri
     fs::read_to_string(path).map_err(|e| format!("读取{kind} {rel} 失败：{e}"))
 }
 
-fn task_file_stem(title: &str) -> String {
-    let cleaned: String = title
-        .chars()
-        .map(|c| match c {
-            '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-            c if c.is_control() => '_',
-            c => c,
-        })
-        .collect();
-    let trimmed = cleaned.trim().trim_matches('.').trim();
-    let stem: String = trimmed.chars().take(60).collect();
-    if stem.is_empty() { "未命名任务".into() } else { stem }
-}
-
 fn valid_due_date(s: &str) -> bool {
     let parts: Vec<&str> = s.split('-').collect();
     if parts.len() != 3 || parts[0].len() != 4 || parts[1].len() != 2 || parts[2].len() != 2 {
@@ -740,8 +784,293 @@ fn frontmatter_map(block: &str) -> HashMap<String, String> {
     meta
 }
 
-/// 与前端 runView 行为对齐：只匹配带 status 的笔记，按状态/优先级/截止日期/文本过滤
-fn run_view_tasks(root: &str, filters: &Value, limit: usize) -> Vec<Value> {
+/* ==================== Issue 独立存储（<vault>/.pkmx/issues.json） ====================
+ * Issue 与 Markdown 笔记完全独立：不参与笔记扫描、全文索引或文件树。
+ * 旧版「带 status frontmatter 的笔记」在首次加载时一次性迁移进 JSON：
+ * 原文件先备份到 .pkmx/legacy-backup/，再从原位置删除。
+ */
+
+const ISSUE_STATUSES: [&str; 4] = ["Todo", "Doing", "Blocked", "Done"];
+const ISSUE_PRIORITIES: [&str; 4] = ["Low", "Normal", "High", "Urgent"];
+const ISSUE_STORE_REL: &str = ".pkmx/issues.json";
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct Issue {
+    id: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default = "issue_default_status")]
+    status: String,
+    #[serde(default = "issue_default_priority")]
+    priority: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    due: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    done: Option<String>,
+    #[serde(default)]
+    created: String,
+    #[serde(default)]
+    updated: String,
+    /// 从旧 Markdown 任务迁移而来时的原相对路径（用于幂等与失败重试）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    legacy: Option<String>,
+}
+
+fn issue_default_status() -> String {
+    "Todo".into()
+}
+
+fn issue_default_priority() -> String {
+    "Normal".into()
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct IssueStore {
+    #[serde(default = "issue_store_version")]
+    version: u32,
+    #[serde(default)]
+    issues: Vec<Issue>,
+}
+
+fn issue_store_version() -> u32 {
+    1
+}
+
+impl Default for IssueStore {
+    fn default() -> Self {
+        Self { version: issue_store_version(), issues: Vec::new() }
+    }
+}
+
+fn issue_today() -> String {
+    Local::now().format("%Y-%m-%d").to_string()
+}
+
+fn new_issue_id() -> String {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("iss_{ms:x}_{seq:x}")
+}
+
+fn issues_path(root: &str) -> PathBuf {
+    PathBuf::from(root).join(ISSUE_STORE_REL)
+}
+
+fn read_issue_store(root: &str) -> Result<(IssueStore, bool), String> {
+    let path = issues_path(root);
+    if !path.exists() {
+        return Ok((IssueStore::default(), false));
+    }
+    let text = fs::read_to_string(&path).map_err(|e| format!("读取 Issue 存储失败：{e}"))?;
+    let store: IssueStore = serde_json::from_str(&text)
+        .map_err(|e| format!("Issue 数据格式损坏（{}）：{e}", path.display()))?;
+    Ok((store, true))
+}
+
+/// 原子写入：先写临时文件再替换，避免中途崩溃留下半截 JSON
+fn write_issue_store(root: &str, store: &IssueStore) -> Result<u64, String> {
+    let path = issues_path(root);
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(|e| format!("创建 Issue 目录失败：{e}"))?;
+    }
+    let text = serde_json::to_string_pretty(store).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, text).map_err(|e| format!("写入 Issue 存储失败：{e}"))?;
+    if let Err(first) = fs::rename(&tmp, &path) {
+        // Windows 目标文件被占用时 rename 可能失败：退一步先移除旧文件
+        fs::remove_file(&path)
+            .map_err(|_| format!("保存 Issue 存储失败：{first}"))?;
+        fs::rename(&tmp, &path).map_err(|e| format!("保存 Issue 存储失败：{e}"))?;
+    }
+    Ok(mtime_ms(&path))
+}
+
+/// 去掉正文开头的一级标题（标题已作为 Issue.title 独立保存）
+fn strip_leading_h1(body: &str) -> String {
+    let mut out = String::new();
+    let mut skipped = false;
+    for line in body.lines() {
+        if !skipped && line.starts_with("# ") {
+            skipped = true;
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.trim().to_string()
+}
+
+/// 备份并删除一个仍是旧任务格式的 Markdown 文件；返回是否真的删除
+fn backup_and_remove_legacy(root: &str, rel: &str) -> Result<bool, String> {
+    let src = safe_join(root, rel)?;
+    if !src.is_file() {
+        return Ok(false);
+    }
+    let Ok(text) = fs::read_to_string(&src) else { return Ok(false) };
+    let (meta_text, _) = split_frontmatter(&text);
+    let Some(meta_text) = meta_text else { return Ok(false) };
+    let meta = frontmatter_map(meta_text);
+    let Some(status) = meta.get("status") else { return Ok(false) };
+    if !ISSUE_STATUSES.contains(&status.as_str()) {
+        return Ok(false);
+    }
+    let backup = PathBuf::from(root).join(".pkmx").join("legacy-backup").join(rel);
+    if let Some(dir) = backup.parent() {
+        fs::create_dir_all(dir).map_err(|e| format!("备份旧任务失败：{e}"))?;
+    }
+    fs::copy(&src, &backup).map_err(|e| format!("备份旧任务 {rel} 失败：{e}"))?;
+    fs::remove_file(&src).map_err(|e| format!("删除已迁移的旧任务 {rel} 失败：{e}"))?;
+    Ok(true)
+}
+
+/// 扫描旧任务笔记并转成 Issue；不落盘、不删除，由调用方先保存 JSON
+fn migrate_legacy_tasks(root: &str, store: &mut IssueStore) -> Vec<String> {
+    let known: HashSet<String> = store.issues.iter().filter_map(|i| i.legacy.clone()).collect();
+    let mut migrated = Vec::new();
+    for rel in vault_files(root) {
+        if known.contains(&rel) {
+            continue;
+        }
+        let Ok(path) = safe_join(root, &rel) else { continue };
+        let Ok(text) = fs::read_to_string(&path) else { continue };
+        let (meta_text, body) = split_frontmatter(&text);
+        let Some(meta_text) = meta_text else { continue };
+        let meta = frontmatter_map(meta_text);
+        let Some(status) = meta.get("status").map(String::as_str) else { continue };
+        if !ISSUE_STATUSES.contains(&status) {
+            continue;
+        }
+        let priority = meta
+            .get("priority")
+            .map(String::as_str)
+            .filter(|p| ISSUE_PRIORITIES.contains(p))
+            .unwrap_or("Normal");
+        let due = meta
+            .get("due")
+            .filter(|d| valid_due_date(d))
+            .cloned();
+        let created = meta.get("created").cloned().unwrap_or_else(issue_today);
+        let done = meta
+            .get("done")
+            .cloned()
+            .or_else(|| (status == "Done").then(issue_today));
+        let title = note_title(&rel, &text);
+        store.issues.push(Issue {
+            id: new_issue_id(),
+            title,
+            body: strip_leading_h1(body),
+            status: status.to_string(),
+            priority: priority.to_string(),
+            due,
+            done,
+            created,
+            updated: issue_today(),
+            legacy: Some(rel.clone()),
+        });
+        migrated.push(rel);
+    }
+    migrated
+}
+
+struct LoadedIssues {
+    store: IssueStore,
+    created: bool,
+    migrated: Vec<String>,
+    removed: Vec<String>,
+    mtime: u64,
+}
+
+/// 读取 Issue；文件不存在时执行一次性迁移。迁移先保存 JSON，再备份并删除原 Markdown。
+fn load_issues(root: &str) -> Result<LoadedIssues, String> {
+    let path = issues_path(root);
+    let existed = path.exists();
+    let (mut store, _) = read_issue_store(root)?;
+    let mut normalized = false;
+    for issue in &mut store.issues {
+        if issue.status == "Wont" {
+            // 放弃功能已移除：历史 Wont 重新打开为待办，避免数据不可见
+            issue.status = "Todo".into();
+            issue.done = None;
+            normalized = true;
+        }
+    }
+    let migrated = if existed { Vec::new() } else { migrate_legacy_tasks(root, &mut store) };
+
+    if !existed || normalized || !migrated.is_empty() {
+        write_issue_store(root, &store)?;
+    }
+
+    // JSON 已存在也重试：上次删除失败（如文件被占用）时继续清理
+    let mut removed = Vec::new();
+    for issue in &store.issues {
+        if let Some(rel) = issue.legacy.as_deref() {
+            if backup_and_remove_legacy(root, rel)? {
+                removed.push(rel.to_string());
+            }
+        }
+    }
+    Ok(LoadedIssues { store, created: !existed, migrated, removed, mtime: mtime_ms(&path) })
+}
+
+fn normalize_issue_title(args: &Value) -> Result<Option<String>, String> {
+    let Some(raw) = args.get("title").and_then(|v| v.as_str()) else {
+        return Ok(None);
+    };
+    let title = raw.trim();
+    if title.is_empty() {
+        return Err("title 不能为空".into());
+    }
+    if title.contains(['\n', '\r']) {
+        return Err("title 不能包含换行".into());
+    }
+    Ok(Some(title.to_string()))
+}
+
+fn normalize_issue_status(args: &Value) -> Result<Option<String>, String> {
+    let Some(raw) = args.get("status").and_then(|v| v.as_str()) else {
+        return Ok(None);
+    };
+    let status = raw.trim();
+    if !ISSUE_STATUSES.contains(&status) {
+        return Err(format!("status 只能是 Todo/Doing/Blocked/Done（收到 {status}）"));
+    }
+    Ok(Some(status.to_string()))
+}
+
+fn normalize_issue_priority(args: &Value) -> Result<Option<String>, String> {
+    let Some(raw) = args.get("priority").and_then(|v| v.as_str()) else {
+        return Ok(None);
+    };
+    let priority = raw.trim();
+    if !ISSUE_PRIORITIES.contains(&priority) {
+        return Err(format!("priority 只能是 Low/Normal/High/Urgent（收到 {priority}）"));
+    }
+    Ok(Some(priority.to_string()))
+}
+
+/// `due` 允许空串表示清空
+fn normalize_issue_due(args: &Value) -> Result<Option<Option<String>>, String> {
+    let Some(raw) = args.get("due").and_then(|v| v.as_str()) else {
+        return Ok(None);
+    };
+    let due = raw.trim();
+    if due.is_empty() {
+        return Ok(Some(None));
+    }
+    if !valid_due_date(due) {
+        return Err(format!("due 必须是 YYYY-MM-DD 日期（收到 {due}）"));
+    }
+    Ok(Some(Some(due.to_string())))
+}
+
+/// 将 Issue 按视图过滤条件筛选（与前端 runView 行为一致）
+fn filter_issues(store: &IssueStore, filters: &Value, limit: usize) -> Vec<Issue> {
     let status_filter = filters.get("status").and_then(|v| v.as_str());
     let priority_filter = filters.get("priority").and_then(|v| v.as_str());
     let text_filter = filters.get("text").and_then(|v| v.as_str()).map(str::to_lowercase);
@@ -751,74 +1080,47 @@ fn run_view_tasks(root: &str, filters: &Value, limit: usize) -> Vec<Value> {
     let sunday = monday + Duration::days(6);
     let today_str = today.format("%Y-%m-%d").to_string();
 
-    let mut tasks = Vec::new();
-    for rel in vault_files(root) {
-        let Ok(path) = safe_join(root, &rel) else { continue };
-        let Ok(text) = fs::read_to_string(&path) else { continue };
-        let (meta_text, body) = split_frontmatter(&text);
-        let meta = meta_text.map(frontmatter_map).unwrap_or_default();
-        let Some(status) = meta.get("status") else { continue };
-        if let Some(want) = status_filter {
-            if !want.split(',').map(str::trim).any(|s| s == status.as_str()) {
-                continue;
-            }
-        }
-        let priority = meta.get("priority").map(String::as_str);
-        if let Some(want) = priority_filter {
-            let Some(p) = priority else { continue };
-            if !want.split(',').map(str::trim).any(|s| s == p) {
-                continue;
-            }
-        }
-        if let Some(q) = &text_filter {
-            let haystack = format!("{}\n{}", note_title(&rel, &text), body).to_lowercase();
-            if !haystack.contains(q) {
-                continue;
-            }
-        }
-        let due = meta.get("due").map(String::as_str);
-        match due_filter {
-            "today" if due != Some(today_str.as_str()) => continue,
-            "overdue" => {
-                let Some(d) = due else { continue };
-                if d >= today_str.as_str() {
-                    continue;
+    let mut issues: Vec<Issue> = store
+        .issues
+        .iter()
+        .filter(|issue| {
+            if let Some(want) = status_filter {
+                if !want.split(',').map(str::trim).any(|s| s == issue.status) {
+                    return false;
                 }
             }
-            "week" => {
-                let Some(d) = due.and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()) else {
-                    continue;
-                };
-                if d < monday || d > sunday {
-                    continue;
+            if let Some(want) = priority_filter {
+                if !want.split(',').map(str::trim).any(|s| s == issue.priority) {
+                    return false;
                 }
             }
-            _ => {}
-        }
-        let title = note_title(&rel, &text);
-        tasks.push(json!({
-            "rel": rel,
-            "title": title,
-            "status": status,
-            "priority": priority,
-            "due": due,
-            "mtime": mtime_ms(&path),
-        }));
-    }
-    tasks.sort_by(|a, b| {
-        let due_key = |v: &Value| match v["due"].as_str() {
-            Some(d) if !d.is_empty() => d.to_string(),
-            _ => "9999-99-99".to_string(),
-        };
-        due_key(a).cmp(&due_key(b)).then_with(|| {
-            a["title"]
-                .as_str()
-                .unwrap_or("")
-                .cmp(b["title"].as_str().unwrap_or(""))
+            if let Some(q) = &text_filter {
+                let haystack = format!("{}\n{}", issue.title, issue.body).to_lowercase();
+                if !haystack.contains(q) {
+                    return false;
+                }
+            }
+            match due_filter {
+                "today" => issue.due.as_deref() == Some(today_str.as_str()),
+                "overdue" => issue.due.as_deref().is_some_and(|d| d < today_str.as_str()),
+                "week" => issue
+                    .due
+                    .as_deref()
+                    .and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
+                    .is_some_and(|d| d >= monday && d <= sunday),
+                _ => true,
+            }
         })
+        .cloned()
+        .collect();
+    issues.sort_by(|a, b| {
+        let due_key = |i: &Issue| i.due.clone().unwrap_or_else(|| "9999-99-99".into());
+        due_key(a)
+            .cmp(&due_key(b))
+            .then_with(|| a.title.cmp(&b.title))
     });
-    tasks.truncate(limit);
-    tasks
+    issues.truncate(limit);
+    issues
 }
 
 // ---- 视图（views 目录下的 .yml，扁平键：name/status/priority/due/text） ----
@@ -861,7 +1163,7 @@ fn render_view_yml(name: &str, args: &Value) -> Result<String, String> {
     if let Some(status) = args.get("status").and_then(|v| v.as_str()) {
         validate_filter_list(
             status,
-            &["Todo", "Doing", "Blocked", "Done", "Wont"],
+            &["Todo", "Doing", "Blocked", "Done"],
             "status",
         )?;
     }
@@ -943,14 +1245,14 @@ fn mcp_tools() -> Value {
     );
     let create_task = tool(
         "create_task",
-        "创建任务（issue）笔记：写入设置中的默认文档地址，自动生成 status/priority/due frontmatter；同名文件自动加 -2 后缀",
+        "create_issue 的兼容别名：创建一个 Issue（独立存于 .pkmx/issues.json，不是 Markdown 笔记）",
         json!({
-            "title": { "type": "string", "description": "任务标题，同时作为文件名" },
-            "body": { "type": "string", "description": "正文（可选），会自动补一级标题" },
+            "title": { "type": "string", "description": "Issue 标题" },
+            "body": { "type": "string", "description": "描述（Markdown，可选）" },
             "status": {
                 "type": "string",
-                "enum": ["Todo", "Doing", "Blocked", "Done", "Wont"],
-                "description": "任务状态，默认 Todo"
+                "enum": ["Todo", "Doing", "Blocked", "Done"],
+                "description": "状态，默认 Todo"
             },
             "priority": {
                 "type": "string",
@@ -960,6 +1262,67 @@ fn mcp_tools() -> Value {
             "due": { "type": "string", "description": "截止日期 YYYY-MM-DD（可选）" }
         }),
         &["title"],
+    );
+    let issue_fields = json!({
+        "title": { "type": "string", "description": "Issue 标题" },
+        "body": { "type": "string", "description": "描述（Markdown，可选）" },
+        "status": {
+            "type": "string",
+            "enum": ["Todo", "Doing", "Blocked", "Done"],
+            "description": "状态"
+        },
+        "priority": {
+            "type": "string",
+            "enum": ["Low", "Normal", "High", "Urgent"],
+            "description": "优先级"
+        },
+        "due": { "type": "string", "description": "截止日期 YYYY-MM-DD；更新时传空串可清空" }
+    });
+    let list_issues = tool(
+        "list_issues",
+        "列出 Issue（独立 JSON 存储，与笔记分离）。可按状态/优先级/截止日期/文本过滤，按截止日期排序",
+        json!({
+            "status": { "type": "string", "description": "状态过滤，逗号分隔：Todo, Doing, Blocked, Done" },
+            "priority": { "type": "string", "description": "优先级过滤，逗号分隔：Low, Normal, High, Urgent" },
+            "due": { "type": "string", "enum": ["all", "today", "week", "overdue"] },
+            "text": { "type": "string", "description": "标题或描述关键词" },
+            "limit": { "type": "integer", "description": "最多返回条数，默认 100" }
+        }),
+        &[],
+    );
+    let get_issue = tool(
+        "get_issue",
+        "读取一个 Issue 的完整内容与 Issue 存储文件的 mtime（unix 毫秒）",
+        json!({
+            "id": { "type": "string", "description": "Issue id，如 iss_..." }
+        }),
+        &["id"],
+    );
+    let create_issue = tool(
+        "create_issue",
+        "创建一个 Issue（独立存于 <仓库>/.pkmx/issues.json，不写入 Markdown）",
+        issue_fields.clone(),
+        &["title"],
+    );
+    let update_issue = tool(
+        "update_issue",
+        "修改 Issue（只更新提供的字段）。due 传空串可清空；status 改为 Done 自动记录完成日期。可带 expected_mtime 守卫（来自 get_issue）",
+        {
+            let mut p = issue_fields.clone();
+            p["id"] = json!({ "type": "string" });
+            p["expected_mtime"] = json!({ "type": "integer", "description": "读取时获得的 mtime，防止读改写竞争" });
+            p
+        },
+        &["id"],
+    );
+    let delete_issue = tool(
+        "delete_issue",
+        "删除一个 Issue（不可恢复）。可带 expected_mtime 守卫",
+        json!({
+            "id": { "type": "string" },
+            "expected_mtime": { "type": "integer", "description": "可选 mtime 守卫（unix 毫秒）" }
+        }),
+        &["id"],
     );
     let append = tool(
         "append_to_note",
@@ -981,7 +1344,7 @@ fn mcp_tools() -> Value {
     );
     let view_filters = json!({
         "name": { "type": "string", "description": "视图名（文件名与显示名）" },
-        "status": { "type": "string", "description": "状态过滤，逗号分隔：Todo, Doing, Blocked, Done, Wont" },
+        "status": { "type": "string", "description": "状态过滤，逗号分隔：Todo, Doing, Blocked, Done" },
         "priority": { "type": "string", "description": "优先级过滤，逗号分隔：Low, Normal, High, Urgent" },
         "due": { "type": "string", "enum": ["all", "today", "week", "overdue"] },
         "text": { "type": "string", "description": "全文关键词" }
@@ -1000,7 +1363,7 @@ fn mcp_tools() -> Value {
     );
     let vrun = tool(
         "run_view",
-        "运行保存视图，返回匹配的任务（带 status 的笔记）：状态/优先级/截止日期/文本过滤与界面一致",
+        "运行保存视图，返回匹配的 Issue（数据存于 .pkmx/issues.json）：状态/优先级/截止日期/文本过滤与界面一致",
         json!({
             "rel": { "type": "string", "description": "如 views/进行中.yml" },
             "limit": { "type": "integer", "description": "最多返回条数，默认 100" }
@@ -1037,10 +1400,15 @@ fn mcp_tools() -> Value {
         search,
         get,
         mark(create, perms.create),
-        mark(create_task, perms.create),
+        mark(create_task, perms.issue_write),
         mark(update, perms.update),
         mark(append, perms.append),
         mark(delete, perms.delete),
+        mark(list_issues, perms.issue_read),
+        mark(get_issue, perms.issue_read),
+        mark(create_issue, perms.issue_write),
+        mark(update_issue, perms.issue_write),
+        mark(delete_issue, perms.issue_write),
         mark(vlist, perms.view_read),
         mark(vget, perms.view_read),
         mark(vrun, perms.view_read),
@@ -1050,6 +1418,104 @@ fn mcp_tools() -> Value {
     ])
 }
 
+fn mcp_create_issue(root: &str, args: &Value) -> Result<Value, String> {
+    let title = normalize_issue_title(args)?.ok_or("title required")?;
+    let status = normalize_issue_status(args)?.unwrap_or_else(|| "Todo".into());
+    let priority = normalize_issue_priority(args)?.unwrap_or_else(|| "Normal".into());
+    let due = normalize_issue_due(args)?.flatten();
+    let body = args["body"].as_str().unwrap_or("").trim().to_string();
+    let today = issue_today();
+    let issue = Issue {
+        id: new_issue_id(),
+        title,
+        body,
+        status: status.clone(),
+        priority,
+        due,
+        done: (status == "Done").then(|| today.clone()),
+        created: today.clone(),
+        updated: today,
+        legacy: None,
+    };
+    let mut loaded = load_issues(root)?;
+    loaded.store.issues.push(issue.clone());
+    let mtime = write_issue_store(root, &loaded.store)?;
+    let mut out = serde_json::to_value(&issue).map_err(|e| e.to_string())?;
+    out["mtime"] = json!(mtime);
+    Ok(out)
+}
+
+fn mcp_update_issue(root: &str, args: &Value) -> Result<Value, String> {
+    let id = args["id"].as_str().ok_or("id required")?;
+    let title = normalize_issue_title(args)?;
+    let status = normalize_issue_status(args)?;
+    let priority = normalize_issue_priority(args)?;
+    let due_patch = normalize_issue_due(args)?;
+    let body_patch = args.get("body").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let mut loaded = load_issues(root)?;
+    let path = issues_path(root);
+    if let Some(exp) = args["expected_mtime"].as_u64() {
+        let cur = mtime_ms(&path);
+        if cur != exp {
+            return Err(format!(
+                "mtime 不匹配：Issue 已被其他方修改（当前 {cur}，期望 {exp}，unix 毫秒）。请重新 get_issue"
+            ));
+        }
+    }
+    let today = issue_today();
+    let Some(issue) = loaded.store.issues.iter_mut().find(|i| i.id == id) else {
+        return Err(format!("Issue 不存在：{id}；可先用 list_issues 查看"));
+    };
+    if let Some(title) = title {
+        issue.title = title;
+    }
+    if let Some(body) = body_patch {
+        issue.body = body;
+    }
+    if let Some(status) = status {
+        if status == "Done" {
+            if issue.done.is_none() {
+                issue.done = Some(today.clone());
+            }
+        } else {
+            issue.done = None;
+        }
+        issue.status = status;
+    }
+    if let Some(priority) = priority {
+        issue.priority = priority;
+    }
+    if let Some(due) = due_patch {
+        issue.due = due;
+    }
+    issue.updated = today;
+    let out = serde_json::to_value(&*issue).map_err(|e| e.to_string())?;
+    let mtime = write_issue_store(root, &loaded.store)?;
+    let mut out = out;
+    out["mtime"] = json!(mtime);
+    Ok(out)
+}
+
+fn mcp_delete_issue(root: &str, args: &Value) -> Result<Value, String> {
+    let id = args["id"].as_str().ok_or("id required")?;
+    let mut loaded = load_issues(root)?;
+    let path = issues_path(root);
+    if let Some(exp) = args["expected_mtime"].as_u64() {
+        let cur = mtime_ms(&path);
+        if cur != exp {
+            return Err(format!(
+                "mtime 不匹配：Issue 已被其他方修改（当前 {cur}，期望 {exp}，unix 毫秒）。请重新 get_issue"
+            ));
+        }
+    }
+    let Some(pos) = loaded.store.issues.iter().position(|i| i.id == id) else {
+        return Err(format!("Issue 不存在：{id}；可先用 list_issues 查看"));
+    };
+    loaded.store.issues.remove(pos);
+    let mtime = write_issue_store(root, &loaded.store)?;
+    Ok(json!({ "id": id, "deleted": true, "mtime": mtime }))
+}
+
 fn mcp_call(name: &str, root: &str, args: &Value) -> Result<Value, String> {
     // 写入类工具每次调用重读权限文件，GUI 改动即时生效
     let perms = load_mcp_perms();
@@ -1057,6 +1523,10 @@ fn mcp_call(name: &str, root: &str, args: &Value) -> Result<Value, String> {
     let note_rel = |rel: &str| -> Result<(), String> {
         if rel.starts_with("views/") {
             Err(format!("{rel} 是视图文件，请使用视图工具（list_views / get_view / create_view / update_view / delete_view）"))
+        } else if rel.split(['/', '\\']).any(|seg| seg.starts_with('.')) {
+            Err(format!(
+                "{rel} 位于内部数据目录，笔记工具不可访问；Issue 数据请使用 Issue 工具（list_issues / create_issue / update_issue / delete_issue）"
+            ))
         } else {
             Ok(())
         }
@@ -1096,80 +1566,47 @@ fn mcp_call(name: &str, root: &str, args: &Value) -> Result<Value, String> {
             fs::write(&path, content).map_err(|e| e.to_string())?;
             Ok(json!({ "rel": rel, "created": true }))
         }
-        "create_task" => {
-            if !perms.create {
-                return Err("权限拒绝：create_task 已在 PKMX 设置（MCP 权限）中禁用".into());
-            }
-            let title = args["title"]
-                .as_str()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .ok_or("title required")?;
-            if title.contains(['\n', '\r']) {
-                return Err("title 不能包含换行".into());
-            }
-            let status = args["status"]
-                .as_str()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .unwrap_or("Todo");
-            if !["Todo", "Doing", "Blocked", "Done", "Wont"].contains(&status) {
+        "create_task" | "create_issue" => {
+            if !perms.issue_write {
                 return Err(format!(
-                    "status 只能是 Todo/Doing/Blocked/Done/Wont（收到 {status}）"
+                    "权限拒绝：{name} 已在 PKMX 设置（MCP 权限 → Issue）中禁用"
                 ));
             }
-            let priority = args["priority"]
-                .as_str()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .unwrap_or("Normal");
-            if !["Low", "Normal", "High", "Urgent"].contains(&priority) {
-                return Err(format!(
-                    "priority 只能是 Low/Normal/High/Urgent（收到 {priority}）"
-                ));
+            mcp_create_issue(root, args)
+        }
+        "list_issues" => {
+            if !perms.issue_read {
+                return Err("权限拒绝：list_issues 已在 PKMX 设置（MCP 权限 → Issue）中禁用".into());
             }
-            let due = args["due"].as_str().map(str::trim).filter(|s| !s.is_empty());
-            if let Some(d) = due {
-                if !valid_due_date(d) {
-                    return Err(format!("due 必须是 YYYY-MM-DD 日期（收到 {d}）"));
-                }
+            let loaded = load_issues(root)?;
+            let limit = args["limit"].as_u64().unwrap_or(100) as usize;
+            let issues = filter_issues(&loaded.store, args, limit);
+            Ok(json!({ "count": issues.len(), "issues": issues, "mtime": loaded.mtime }))
+        }
+        "get_issue" => {
+            if !perms.issue_read {
+                return Err("权限拒绝：get_issue 已在 PKMX 设置（MCP 权限 → Issue）中禁用".into());
             }
-            let folder = load_app_settings().default_folder;
-            let stem = task_file_stem(title);
-            let mut name = format!("{stem}.md");
-            let mut rel = if folder.is_empty() { name.clone() } else { format!("{folder}/{name}") };
-            let mut n = 2;
-            while safe_join(root, &rel)?.exists() {
-                name = format!("{stem}-{n}.md");
-                rel = if folder.is_empty() { name.clone() } else { format!("{folder}/{name}") };
-                n += 1;
-                if n > 1000 {
-                    return Err(format!("同名任务过多，无法为《{title}》生成文件名"));
-                }
+            let id = args["id"].as_str().ok_or("id required")?;
+            let loaded = load_issues(root)?;
+            let Some(issue) = loaded.store.issues.iter().find(|i| i.id == id) else {
+                return Err(format!("Issue 不存在：{id}；可先用 list_issues 查看"));
+            };
+            let mut out = serde_json::to_value(issue).map_err(|e| e.to_string())?;
+            out["mtime"] = json!(loaded.mtime);
+            Ok(out)
+        }
+        "update_issue" => {
+            if !perms.issue_write {
+                return Err("权限拒绝：update_issue 已在 PKMX 设置（MCP 权限 → Issue）中禁用".into());
             }
-            let body = args["body"].as_str().unwrap_or("").trim();
-            let mut content = format!("---\nstatus: {status}\npriority: {priority}\n");
-            if let Some(d) = due {
-                content.push_str(&format!("due: {d}\n"));
+            mcp_update_issue(root, args)
+        }
+        "delete_issue" => {
+            if !perms.issue_write {
+                return Err("权限拒绝：delete_issue 已在 PKMX 设置（MCP 权限 → Issue）中禁用".into());
             }
-            content.push_str(&format!("---\n\n# {title}\n"));
-            if !body.is_empty() {
-                content.push_str(&format!("\n{body}\n"));
-            }
-            let path = safe_join(root, &rel)?;
-            if let Some(p) = path.parent() {
-                fs::create_dir_all(p).map_err(|e| format!("创建默认文档目录失败：{e}"))?;
-            }
-            fs::write(&path, &content).map_err(|e| format!("创建任务 {rel} 失败：{e}"))?;
-            Ok(json!({
-                "rel": rel,
-                "title": title,
-                "status": status,
-                "priority": priority,
-                "due": due,
-                "folder": folder,
-                "mtime": mtime_ms(&path),
-            }))
+            mcp_delete_issue(root, args)
         }
         "update_note" => {
             if !perms.update {
@@ -1268,13 +1705,15 @@ fn mcp_call(name: &str, root: &str, args: &Value) -> Result<Value, String> {
             let text = read_text_friendly(&path, rel, "视图")?;
             let (vname, filters) = parse_view_yml(&text);
             let limit = args["limit"].as_u64().unwrap_or(100) as usize;
-            let tasks = run_view_tasks(root, &filters, limit);
+            let loaded = load_issues(root)?;
+            let issues = filter_issues(&loaded.store, &filters, limit);
             Ok(json!({
                 "rel": rel,
                 "name": vname,
                 "filters": filters,
-                "count": tasks.len(),
-                "tasks": tasks,
+                "count": issues.len(),
+                "issues": issues,
+                "mtime": loaded.mtime,
             }))
         }
         "create_view" => {
@@ -1434,6 +1873,8 @@ pub fn run(vault_arg: Option<String>) {
             vault_read_bin,
             vault_watch,
             vault_search,
+            vault_issues_load,
+            vault_issues_save,
             initial_vault,
             mcp_get_perms,
             mcp_set_perms,

@@ -3,7 +3,6 @@ import { ChevronRight, FileSpreadsheet, FileText, Folder, Presentation, Plus } f
 import { cn } from "@/lib/utils";
 import { useStore, revealNoteInExplorer, isExternalNote, extraVaultRootOf } from "@/store";
 import { isTauri } from "@/lib/vault";
-import { StatusDot } from "./Chips";
 import ContextMenu, { type CtxItem } from "./ContextMenu";
 
 const docIcon = (ext?: string, size = 13) => {
@@ -161,7 +160,6 @@ export default function FileTree({ onNewInFolder }: { onNewInFolder?: (folder: s
       {n.doc && (
         <span className="shrink-0 font-mono text-[9.5px] text-muted-foreground/80">.{n.ext}</span>
       )}
-      {n.status && !n.doc && !["Done", "Wont"].includes(n.status) && <StatusDot s={n.status as never} />}
     </button>
   );
 

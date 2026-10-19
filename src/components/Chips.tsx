@@ -51,7 +51,7 @@ export function DueChip({ due }: { due: string }) {
   );
 }
 
-/** 任务状态小圆点（文件树/列表用） */
+/** Issue 状态小圆点（列表用） */
 export function StatusDot({ s, className }: { s: Status; className?: string }) {
   return (
     <span

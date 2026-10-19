@@ -6,10 +6,25 @@ import { MemoryVault, FsVault, isTauri, type VaultRepo } from "@/lib/vault";
 import { isDocFile, toDocNote } from "@/lib/office";
 import { TODAY, currentWeek } from "@/lib/dates";
 import { toggleTaskInBody, taskLineAt, removeTaskLine, plainTitle } from "@/lib/markdown";
-import { PRIORITY_LABEL, STATUS_LABEL, type Note, type Priority, type Status } from "@/lib/types";
+import {
+  STATUS_LABEL,
+  type Issue,
+  type IssueSnapshot,
+  type Note,
+  type Priority,
+  type Status,
+} from "@/lib/types";
 import { applyTheme, migrateTheme, themeKind } from "@/lib/themes";
 
-export type ViewKind = "note" | "daily" | "due" | "week" | "search" | "graph" | "saved" | "settings";
+export type ViewKind =
+  | "note"
+  | "board"
+  | "archive"
+  | "report"
+  | "issue"
+  | "search"
+  | "saved"
+  | "settings";
 export type EditorMode = "read" | "block" | "source";
 
 /** 保存视图（views/*.yml，扁平过滤） */
@@ -41,12 +56,11 @@ export function parseViewYml(text: string, id: string): SavedView | null {
   return { id, name, def };
 }
 
-export function runView(notes: Note[], v: SavedView): Note[] {
+export function runView(issues: Issue[], v: SavedView): Issue[] {
   const week = currentWeek();
-  return notes.filter((n) => {
-    if (!n.status) return false;
+  return issues.filter((n) => {
     if (v.def.status?.length && !v.def.status.includes(n.status)) return false;
-    if (v.def.priority?.length && (!n.priority || !v.def.priority.includes(n.priority))) return false;
+    if (v.def.priority?.length && !v.def.priority.includes(n.priority)) return false;
     if (v.def.text && !(`${n.title}\n${n.body}`.toLowerCase().includes(v.def.text.toLowerCase()))) return false;
     if (v.def.due === "today" && n.due !== TODAY) return false;
     if (v.def.due === "overdue" && !(n.due && n.due < TODAY)) return false;
@@ -54,6 +68,9 @@ export function runView(notes: Note[], v: SavedView): Note[] {
     return true;
   });
 }
+
+const newIssueId = (): string =>
+  `iss_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 
 /* ---------- 通用输入对话框（替代 window.prompt） ---------- */
 export interface PromptState {
@@ -172,6 +189,54 @@ const vaultNameOf = (root: string): string =>
 const lastWritten = new Map<string, string>();
 const pendingFs = new Map<string, number>();
 
+/* ---------- Issue 独立存储（.pkmx/issues.json） ---------- */
+const ISSUE_STORE_REL = ".pkmx/issues.json";
+let issueSaveTimer: number | null = null;
+let issueSaveChain: Promise<void> = Promise.resolve();
+/** 最近一次由本进程写入磁盘的 Issue 快照：用于区分 watcher 回声与真正的外部修改 */
+let lastIssuesSaved = "";
+
+function issueWriteTarget(): VaultRepo | null {
+  if (!isTauri() || !primaryRoot || repo.kind !== "fs") return null;
+  return repo;
+}
+
+function persistIssueSnapshot(target: VaultRepo, issues: Issue[]): Promise<void> {
+  const snapshot = JSON.stringify(issues);
+  issueSaveChain = issueSaveChain.then(async () => {
+    try {
+      lastIssuesSaved = snapshot;
+      const mtime = await target.saveIssues(issues);
+      useStore.setState((s) => ({ issuesMtime: Math.max(s.issuesMtime, mtime) }));
+    } catch (e) {
+      toast.error("Issue 保存失败", { description: String(e) });
+    }
+  });
+  return issueSaveChain;
+}
+
+/** 合并高频编辑：400ms 后写盘；写请求串行，避免旧快照覆盖新快照 */
+function scheduleIssueSave(delay = 400) {
+  const target = issueWriteTarget();
+  if (!target) return;
+  if (issueSaveTimer !== null) window.clearTimeout(issueSaveTimer);
+  issueSaveTimer = window.setTimeout(() => {
+    issueSaveTimer = null;
+    void persistIssueSnapshot(target, useStore.getState().issues);
+  }, delay);
+}
+
+async function flushIssueSave() {
+  if (issueSaveTimer !== null) {
+    window.clearTimeout(issueSaveTimer);
+    issueSaveTimer = null;
+  }
+  const target = issueWriteTarget();
+  if (target) await persistIssueSnapshot(target, useStore.getState().issues);
+}
+
+export const saveIssuesNow = (): Promise<void> => flushIssueSave();
+
 function weekdayTitle(date: string): string {
   const [y, m, d] = date.split("-").map(Number);
   const wd = ["日", "一", "二", "三", "四", "五", "六"][new Date(y, m - 1, d).getDay()];
@@ -278,6 +343,8 @@ function sanitizeFileName(title: string): string {
 /** 启动仓库文件监听（仅 Tauri；每个仓库一个 watcher，事件带 root 归属） */
 const watchedRoots = new Set<string>();
 let listenerBound = false;
+/** Rust 事件的 root 统一为 /，本地存储的是平台原始路径，匹配前先归一化 */
+const rootKey = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
 function startWatcher(root: string) {
   if (!isTauri() || watchedRoots.has(root)) return;
   watchedRoots.add(root);
@@ -285,17 +352,49 @@ function startWatcher(root: string) {
     listenerBound = true;
     void import("@tauri-apps/api/event").then(({ listen }) => {
       void listen<{ root: string; rel: string; kind: string }>("vault-fs-event", (ev) => {
-        const { root, rel, kind } = ev.payload;
+        const { rel, kind } = ev.payload;
+        const evRoot = rootKey(ev.payload.root);
+        const actualRoot =
+          primaryRoot && rootKey(primaryRoot) === evRoot
+            ? primaryRoot
+            : [...extraVaults.keys()].find((r) => rootKey(r) === evRoot);
         // 仓库已卸载/移除：Rust 侧 watcher 仍在，但事件不再回流到文件树
-        if (root !== primaryRoot && !extraVaults.has(root)) return;
-        const key = root === primaryRoot ? rel : `${vaultNameOf(root)}::${rel}`;
+        if (!actualRoot) return;
+        const key = actualRoot === primaryRoot ? rel : `${vaultNameOf(actualRoot)}::${rel}`;
         const prev = pendingFs.get(key);
         if (prev) clearTimeout(prev);
         pendingFs.set(
           key,
           window.setTimeout(async () => {
             pendingFs.delete(key);
-            if (root !== primaryRoot && !extraVaults.has(root)) return; // 去抖窗口内仓库已被移除
+            if (actualRoot !== primaryRoot && !extraVaults.has(actualRoot)) return; // 去抖窗口内仓库已被移除
+            // Issue 独立存储：只跟随主仓库；外部（MCP/手工）改动后热更新
+            if (rel === ISSUE_STORE_REL) {
+              if (actualRoot !== primaryRoot || kind === "remove") return;
+              try {
+                const snap = await invoke<IssueSnapshot>("vault_issues_load", { root: actualRoot });
+                const incoming = JSON.stringify(snap.issues);
+                const state = useStore.getState();
+                if (incoming !== lastIssuesSaved && incoming !== JSON.stringify(state.issues)) {
+                  useStore.setState({ issues: snap.issues, issuesMtime: snap.mtime });
+                  lastIssuesSaved = incoming;
+                } else {
+                  useStore.setState({ issuesMtime: snap.mtime });
+                  if (incoming === JSON.stringify(state.issues)) lastIssuesSaved = incoming;
+                }
+                const gone = new Set([...snap.migrated, ...snap.removed]);
+                if (gone.size) {
+                  useStore.setState((s) => ({
+                    notes: s.notes.filter((n) => !(n.rel && gone.has(n.rel))),
+                  }));
+                }
+              } catch {
+                /* 文件正在被替换：等待下一次事件 */
+              }
+              return;
+            }
+            // 隐藏目录（.pkmx 的 Issue 存储与旧任务备份）不进入文件树
+            if (rel.split("/").some((seg) => seg.startsWith("."))) return;
             if (kind === "remove") {
               useStore.setState((s) => ({
                 notes: s.notes.filter((n) => n.id !== key),
@@ -304,12 +403,12 @@ function startWatcher(root: string) {
               return;
             }
             try {
-              const text = await invoke<string>("vault_read", { root, rel });
+              const text = await invoke<string>("vault_read", { root: actualRoot, rel });
               if (lastWritten.get(key) === text) {
                 lastWritten.delete(key); // 自己的写入回声，跳过一次
                 return;
               }
-              const vault = root === primaryRoot ? undefined : { root, name: vaultNameOf(root) };
+              const vault = actualRoot === primaryRoot ? undefined : { root: actualRoot, name: vaultNameOf(actualRoot) };
               if (!vault && rel.startsWith("views/") && rel.endsWith(".yml")) {
                 const v = parseViewYml(text, rel);
                 if (v) {
@@ -320,8 +419,8 @@ function startWatcher(root: string) {
                 return;
               }
               if (!rel.toLowerCase().endsWith(".md") && !isDocFile(rel)) return;
-              if (root !== primaryRoot) {
-                const only = vaultOnly.get(root);
+              if (actualRoot !== primaryRoot) {
+                const only = vaultOnly.get(actualRoot);
                 if (only && !only.has(rel)) return; // 单文件打开的目录：只跟踪已注册文件
               }
               const next = isDocFile(rel)
@@ -393,12 +492,24 @@ function saveExternalFiles() {
   localStorage.setItem(EXTFILES_KEY, JSON.stringify(out));
 }
 
-async function loadInto(next: VaultRepo): Promise<{ notes: Note[]; views: SavedView[] }> {
+async function loadInto(next: VaultRepo): Promise<{
+  notes: Note[];
+  views: SavedView[];
+  issues: Issue[];
+  issuesMtime: number;
+  migrated: string[];
+}> {
   repo = next;
+  // 先加载 Issue：首次会迁移旧任务并删掉原 Markdown，再列文件才不会把旧任务当普通笔记
+  const issueSnap = await next.loadIssues();
+  lastIssuesSaved = JSON.stringify(issueSnap.issues);
   const files = await next.loadAll();
+  const gone = new Set([...issueSnap.migrated, ...issueSnap.removed]);
   const notes: Note[] = [];
   const views: SavedView[] = [];
   for (const f of files) {
+    if (f.relPath.split("/").some((seg) => seg.startsWith("."))) continue; // 跳过 .pkmx 等隐藏目录
+    if (gone.has(f.relPath)) continue;
     if (f.relPath.startsWith("views/") && f.relPath.endsWith(".yml")) {
       const v = parseViewYml(f.text, f.relPath);
       if (v) views.push(v);
@@ -410,15 +521,20 @@ async function loadInto(next: VaultRepo): Promise<{ notes: Note[]; views: SavedV
   }
   notes.sort((a, b) => a.title.localeCompare(b.title, "zh"));
   views.sort((a, b) => a.name.localeCompare(b.name, "zh"));
-  return { notes, views };
+  return { notes, views, issues: issueSnap.issues, issuesMtime: issueSnap.mtime, migrated: issueSnap.migrated };
 }
 
 interface AppState {
   ready: boolean;
   needsVault: boolean;
   notes: Note[];
+  /** 项目 Issue：独立 JSON 存储，和 Markdown 笔记互不混合 */
+  issues: Issue[];
   views: SavedView[];
   activeId: string | null;
+  activeIssueId: string | null;
+  /** .pkmx/issues.json 的 mtime（unix 毫秒），用于判断外部修改 */
+  issuesMtime: number;
   view: ViewKind;
   viewId: string | null; // 保存视图 id
   /** 编辑器三态：阅读 / 块编辑（点击段落就地编辑）/ 源码（整文件直编） */
@@ -451,20 +567,26 @@ interface AppState {
   forgetExternalFile(id: string): void;
   setView(view: ViewKind, activeId?: string | null, viewId?: string | null): void;
   openNote(id: string): void;
+  /** 打开项目 Issue（独立于笔记） */
+  openIssue(id: string): void;
+  createIssue(
+    title: string,
+    opts?: { status?: Status; priority?: Priority; due?: string; body?: string; open?: boolean },
+  ): string | null;
+  updateIssue(
+    id: string,
+    patch: Partial<Pick<Issue, "title" | "body" | "status" | "priority" | "due">>,
+  ): void;
+  deleteIssue(id: string): void;
   openOrCreateByTitle(title: string): void;
   confirmCreate(title: string): void;
   updateBody(id: string, body: string): void;
   updateRaw(id: string, raw: string): void;
   toggleTask(id: string, idx: number): void;
-  checkboxToTask(id: string, idx: number): void;
-  taskToCheckbox(id: string): void;
+  /** 笔记勾选项 → 独立 Issue（同时从正文移除该行） */
+  checkboxToIssue(id: string, idx: number): void;
   pinInjection(noteId: string, which: string): void;
-  setStatus(id: string, s: Status): void;
-  cyclePriority(id: string): void;
-  setDue(id: string, due: string): void;
-  toTask(id: string): void;
-  unTask(id: string): void;
-  capture(title: string, asTask: boolean): void;
+  capture(title: string, asIssue: boolean): void;
   createNoteIn(title: string, folder: string): void;
   /** 新建子文件夹：按约定写入同名占位笔记（文件系统里空目录不保留） */
   createSubFolder(parent: string, name: string): void;
@@ -514,8 +636,11 @@ export const useStore = create<AppState>((set, get) => ({
   ready: false,
   needsVault: false,
   notes: [],
+  issues: [],
   views: [],
   activeId: null,
+  activeIssueId: null,
+  issuesMtime: 0,
   view: "note",
   viewId: null,
   editMode: (["read", "block", "source"] as const).includes(
@@ -547,8 +672,8 @@ export const useStore = create<AppState>((set, get) => ({
     if (!isTauri()) {
       // 浏览器开发：落到内存仓库（无磁盘权限，刷新即空）。恢复现场须在 ready 翻转前完成，
       // 否则记录器会把默认视图覆写进 session，恢复读到的是被覆写的值
-      const { notes, views } = await loadInto(new MemoryVault());
-      set({ notes, views, activeId: notes[0]?.id ?? null });
+      const { notes, views, issues } = await loadInto(new MemoryVault());
+      set({ notes, views, issues, activeId: notes[0]?.id ?? null });
       get().restoreSessionView();
       set({ ready: true });
       return;
@@ -569,10 +694,15 @@ export const useStore = create<AppState>((set, get) => ({
     const saved = localStorage.getItem("pkmx.vault.root");
     if (saved) {
       try {
-        const { notes, views } = await loadInto(new FsVault(saved));
+        const { notes, views, issues, issuesMtime, migrated } = await loadInto(new FsVault(saved));
         primaryRoot = saved;
         startWatcher(saved);
-        set({ notes, views, activeId: notes[0]?.id ?? null, loadedVaults: [saved] });
+        set({ notes, views, issues, issuesMtime, activeId: notes[0]?.id ?? null, loadedVaults: [saved] });
+        if (migrated.length) {
+          toast.success(`已把 ${migrated.length} 个旧任务迁移为 Issue`, {
+            description: "原 Markdown 已备份到 .pkmx/legacy-backup/",
+          });
+        }
         await get().restoreDesktopState();
         set({ ready: true });
         return;
@@ -627,32 +757,37 @@ export const useStore = create<AppState>((set, get) => ({
     get().restoreSessionView();
   },
 
-  /** 校验并恢复上次的视图与笔记（笔记/视图已不存在则保持默认） */
+  /** 校验并恢复上次的视图与笔记（笔记/视图/Issue 已不存在则保持默认） */
   restoreSessionView() {
-    let s: { view?: string; viewId?: string | null; activeId?: string | null } | null = null;
+    let s: { view?: string; viewId?: string | null; activeId?: string | null; activeIssueId?: string | null } | null =
+      null;
     try {
       s = JSON.parse(localStorage.getItem(SESSION_KEY) ?? "null");
     } catch {
       s = null;
     }
-    const KINDS: ViewKind[] = ["note", "daily", "due", "week", "search", "graph", "saved", "settings"];
+    const KINDS: ViewKind[] = ["note", "board", "archive", "report", "issue", "search", "saved", "settings"];
     if (!s || !s.view || !KINDS.includes(s.view as ViewKind)) return;
     const view = s.view as ViewKind;
     const st = get();
     if (view === "saved" && !st.views.some((v) => v.id === s.viewId)) return;
     const activeOk = s.activeId && st.notes.some((n) => n.id === s.activeId) ? s.activeId : null;
+    const issueOk =
+      s.activeIssueId && st.issues.some((i) => i.id === s.activeIssueId) ? s.activeIssueId : null;
     if (view === "note" && !activeOk) return;
+    if (view === "issue" && !issueOk) return;
     set({
       view,
       viewId: view === "saved" ? s.viewId ?? null : null,
       activeId: activeOk ?? st.activeId,
+      activeIssueId: view === "issue" ? issueOk : null,
       editMode: "read",
     });
   },
 
   async openFolderVault(root, register = true) {
     try {
-      const { notes, views } = await loadInto(new FsVault(root));
+      const { notes, views, issues, issuesMtime, migrated } = await loadInto(new FsVault(root));
       localStorage.setItem("pkmx.vault.root", root);
       primaryRoot = root;
       extraVaults.clear();
@@ -668,11 +803,19 @@ export const useStore = create<AppState>((set, get) => ({
       set({
         notes,
         views,
+        issues,
+        issuesMtime,
         needsVault: false,
         activeId: notes[0]?.id ?? null,
+        activeIssueId: null,
         view: "note",
         loadedVaults: [root],
       });
+      if (migrated.length) {
+        toast.success(`已把 ${migrated.length} 个旧任务迁移为 Issue`, {
+          description: "原 Markdown 已备份到 .pkmx/legacy-backup/",
+        });
+      }
       toast.success(`已打开仓库：${repo.rootName} · ${notes.length} 篇笔记`);
     } catch (e) {
       toast.error("打开仓库失败", { description: String(e) });
@@ -736,7 +879,7 @@ export const useStore = create<AppState>((set, get) => ({
         notes,
         views,
         viewId,
-        view: s.view === "saved" && !viewId ? "due" : s.view,
+        view: s.view === "saved" && !viewId ? "board" : s.view,
         activeId: notes.some((n) => n.id === s.activeId) ? s.activeId : notes[0]?.id ?? null,
         openFolders: Object.fromEntries(
           Object.entries(s.openFolders).filter(([k]) => k !== name && !k.startsWith(`${name}/`)),
@@ -771,6 +914,11 @@ export const useStore = create<AppState>((set, get) => ({
       vaultOnly.clear();
       fsVaultCache.clear();
       repo = new MemoryVault();
+      lastIssuesSaved = "";
+      if (issueSaveTimer !== null) {
+        window.clearTimeout(issueSaveTimer);
+        issueSaveTimer = null;
+      }
     }
 
     if (!isPrimary && !isExtra) {
@@ -787,9 +935,12 @@ export const useStore = create<AppState>((set, get) => ({
       return {
         registeredVaults: list,
         notes,
+        issues: isPrimary ? [] : s.issues,
+        activeIssueId: isPrimary ? null : s.activeIssueId,
+        issuesMtime: isPrimary ? 0 : s.issuesMtime,
         views,
         viewId,
-        view: isPrimary ? (s.view === "settings" ? "settings" : "note") : s.view === "saved" && !viewId ? "due" : s.view,
+        view: isPrimary ? (s.view === "settings" ? "settings" : "note") : s.view === "saved" && !viewId ? "board" : s.view,
         activeId: notes.some((n) => n.id === s.activeId) ? s.activeId : notes[0]?.id ?? null,
         openFolders: isPrimary
           ? {}
@@ -840,13 +991,78 @@ export const useStore = create<AppState>((set, get) => ({
       view,
       viewId: viewId !== undefined ? viewId : s.viewId,
       activeId: activeId !== undefined ? activeId : s.activeId,
+      activeIssueId: view === "issue" ? s.activeIssueId : null,
       editMode: "read",
     }));
   },
 
   openNote(id) {
-    set({ view: "note", activeId: id, editMode: "read" });
+    set({ view: "note", activeId: id, activeIssueId: null, editMode: "read" });
     void refreshNoteFromDisk(id);
+  },
+
+  openIssue(id) {
+    if (!get().issues.some((i) => i.id === id)) return;
+    set({ view: "issue", activeIssueId: id, editMode: "read" });
+  },
+
+  createIssue(title, opts) {
+    if (get().needsVault) {
+      toast.error("请先打开一个文件夹作为仓库", { description: "Issue 数据保存在仓库的 .pkmx/issues.json" });
+      return null;
+    }
+    const t = title.trim();
+    if (!t) return null;
+    const issue: Issue = {
+      id: newIssueId(),
+      title: t,
+      body: opts?.body ?? "",
+      status: opts?.status ?? "Todo",
+      priority: opts?.priority ?? "Normal",
+      due: opts?.due || undefined,
+      done: (opts?.status ?? "Todo") === "Done" ? TODAY : undefined,
+      created: TODAY,
+      updated: TODAY,
+    };
+    set((s) => ({
+      issues: [issue, ...s.issues],
+      ...(opts?.open === false
+        ? {}
+        : { view: "issue" as ViewKind, activeIssueId: issue.id, activeId: s.activeId }),
+    }));
+    scheduleIssueSave(0);
+    toast.success(`已创建 Issue《${t}》`);
+    return issue.id;
+  },
+
+  updateIssue(id, patch) {
+    set((s) => ({
+      issues: s.issues.map((i) => {
+        if (i.id !== id) return i;
+        if (patch.title !== undefined && !patch.title.trim()) return i;
+        const status = patch.status ?? i.status;
+        return {
+          ...i,
+          ...patch,
+          status,
+          done: status === "Done" ? i.done ?? TODAY : undefined,
+          updated: TODAY,
+        };
+      }),
+    }));
+    scheduleIssueSave();
+  },
+
+  deleteIssue(id) {
+    const issue = get().issues.find((i) => i.id === id);
+    if (!issue) return;
+    set((s) => ({
+      issues: s.issues.filter((i) => i.id !== id),
+      activeIssueId: s.activeIssueId === id ? null : s.activeIssueId,
+      view: s.activeIssueId === id ? "board" : s.view,
+    }));
+    scheduleIssueSave(0);
+    toast.success(`已删除 Issue《${issue.title}》`);
   },
 
   openOrCreateByTitle(title) {
@@ -924,44 +1140,21 @@ export const useStore = create<AppState>((set, get) => ({
     get().updateBody(id, toggleTaskInBody(note.body, idx));
   },
 
-  /** 勾选项 → 独立任务笔记 */
-  checkboxToTask(id, idx) {
+  /** 笔记勾选项 → 独立 Issue（不生成 Markdown 文件） */
+  checkboxToIssue(id, idx) {
     const note = get().notes.find((n) => n.id === id);
     if (!note) return;
     const line = taskLineAt(note.body, idx);
     if (!line) return;
-    const title = plainTitle(line.text) || "未命名任务";
-    const fileName = `${sanitizeFileName(title)}.md`;
-    const newId = uniqueRelPath(get().notes, fileName, "");
-    const task: Note = {
-      id: newId,
-      folder: "",
-      fileName,
-      title,
-      body: `## 背景\n\n来自 [[${note.title}]] 的勾选项。\n`,
+    const title = plainTitle(line.text) || "未命名 Issue";
+    get().createIssue(title, {
       status: "Todo",
-      priority: "Normal",
-      due: line.due || "",
-      created: TODAY,
-    };
-    persistNote(task);
-    set((s) => ({ notes: [...s.notes, task] }));
+      due: line.due || undefined,
+      body: `来自笔记 [[${note.title}]] 的勾选项。\n`,
+      open: false,
+    });
     get().updateBody(id, removeTaskLine(note.body, idx));
-    toast.success(`已转为任务笔记《${title}》，进入未完成列表`);
-  },
-
-  /** 任务笔记 → 今日待办勾选项 */
-  taskToCheckbox(id) {
-    const note = get().notes.find((n) => n.id === id);
-    if (!note?.status) return;
-    const dailyId = get().ensureDaily();
-    const daily = useStore.getState().notes.find((n) => n.id === dailyId);
-    if (daily) {
-      get().updateBody(daily.id, `${daily.body.replace(/\s*$/, "")}\n- [ ] ${note.title}\n`);
-    }
-    get().unTask(id);
-    set({ activeId: dailyId, view: "note" });
-    toast.success(`已加入今日待办：- [ ] ${note.title}`);
+    toast.success(`已转为 Issue《${title}》，可在看板中查看`);
   },
 
   /** 注入区固化为正文 */
@@ -969,120 +1162,50 @@ export const useStore = create<AppState>((set, get) => ({
     const s = get();
     const note = s.notes.find((n) => n.id === noteId);
     if (!note) return;
-    const week = currentWeek();
-    const collect = (filter: (n: Note) => boolean) =>
-      s.notes.filter(filter).map((n) => `- [[${n.title}]]`).join("\n");
+    const format = (i: Issue) =>
+      `- ${i.title}（${STATUS_LABEL[i.status]}${i.due ? ` · ${i.due}` : ""}）`;
     let md = "";
     if (which === "due") {
-      const rows = collect((n) => Boolean(n.status && n.due && n.due <= TODAY && !["Done", "Wont"].includes(n.status)));
-      md = `\n## 今日到期（固化于 ${new Date().toTimeString().slice(0, 5)}）\n${rows || "- （当时无到期任务）"}\n`;
+      const rows = s.issues
+        .filter((i) => i.status !== "Done" && Boolean(i.due && i.due <= TODAY))
+        .sort((a, b) => (a.due! < b.due! ? -1 : 1))
+        .map(format)
+        .join("\n");
+      md = `\n## 今日到期（固化于 ${new Date().toTimeString().slice(0, 5)}）\n${rows || "- （当时无到期 Issue）"}\n`;
     } else {
-      const rows = collect((n) => Boolean(n.status && n.done === TODAY));
-      md = `\n## 今日完成（固化于 ${new Date().toTimeString().slice(0, 5)}）\n${rows || "- （当时无完成任务）"}\n`;
+      const rows = s.issues.filter((i) => i.done === TODAY).map(format).join("\n");
+      md = `\n## 今日完成（固化于 ${new Date().toTimeString().slice(0, 5)}）\n${rows || "- （当时无完成 Issue）"}\n`;
     }
-    void week;
     get().updateBody(noteId, note.body.replace(/\s*$/, "") + md);
     set((st) => ({ pinnedInjections: { ...st.pinnedInjections, [noteId]: [...(st.pinnedInjections[noteId] ?? []), which] } }));
     toast.success("已固化为正文静态文本");
   },
 
-  setStatus(id, s) {
-    const was = get().notes.find((n) => n.id === id)?.status;
-    set((st) => {
-      const notes = st.notes.map((n) =>
-        n.id === id
-          ? {
-              ...n,
-              status: s,
-              priority: n.priority ?? ("Normal" as Priority),
-              done: s === "Done" ? TODAY : undefined,
-            }
-          : n,
-      );
-      const note = notes.find((n) => n.id === id);
-      if (note) persistNote(note);
-      return { notes };
-    });
-    if (s === "Done") toast.success(`《${get().notes.find((n) => n.id === id)?.title}》已盖章：讫`);
-    else if (was === "Done") toast(`已重新打开`);
-    else toast(`状态 → ${STATUS_LABEL[s]}`);
-  },
-
-  cyclePriority(id) {
-    const note = get().notes.find((n) => n.id === id);
-    if (!note?.priority) return;
-    const order: Priority[] = ["Low", "Normal", "High", "Urgent"];
-    const next = order[(order.indexOf(note.priority) + 1) % order.length];
-    set((s) => {
-      const notes = s.notes.map((n) => (n.id === id ? { ...n, priority: next } : n));
-      persistNote(notes.find((n) => n.id === id)!);
-      return { notes };
-    });
-    toast(`优先级：${PRIORITY_LABEL[next]}`);
-  },
-
-  setDue(id, due) {
-    set((s) => {
-      const notes = s.notes.map((n) => (n.id === id ? { ...n, due } : n));
-      const note = notes.find((n) => n.id === id);
-      if (note) persistNote(note);
-      return { notes };
-    });
-    toast.success("截止日期已更新");
-  },
-
-  toTask(id) {
-    set((s) => {
-      const notes = s.notes.map((n) =>
-        n.id === id ? { ...n, status: "Todo" as Status, priority: "Normal" as Priority } : n,
-      );
-      const note = notes.find((n) => n.id === id);
-      if (note) persistNote(note);
-      return { notes };
-    });
-    toast.success("已转为任务：出现在未完成列表");
-  },
-
-  unTask(id) {
-    set((s) => {
-      const notes = s.notes.map((n) =>
-        n.id === id
-          ? { ...n, status: undefined, priority: undefined, due: undefined, done: undefined }
-          : n,
-      );
-      const note = notes.find((n) => n.id === id);
-      if (note) persistNote(note);
-      return { notes };
-    });
-    toast("已取消任务属性，保留为普通笔记");
-  },
-
-  capture(title, asTask) {
+  capture(title, asIssue) {
     if (get().needsVault) {
       toast.error("请先打开一个文件夹作为仓库", { description: "便签需要保存在仓库目录里" });
+      return;
+    }
+    const preset = get().captureStatus;
+    if (asIssue) {
+      get().createIssue(title, { status: preset ?? "Todo" });
+      set({ captureOpen: false, captureStatus: null });
       return;
     }
     const target = get().defaultFolder;
     const fileName = `${sanitizeFileName(title)}.md`;
     const id = uniqueRelPath(get().notes, fileName, target);
-    const preset = get().captureStatus;
     const note: Note = {
       id,
       folder: target,
       fileName,
       title,
       body: "",
-      status: asTask ? (preset ?? "Todo") : undefined,
-      priority: asTask ? "Normal" : undefined,
       created: TODAY,
     };
     persistNote(note);
     set((s) => ({ notes: [note, ...s.notes], captureOpen: false, captureStatus: null }));
-    toast.success(
-      asTask
-        ? "便签已保存：已转为任务，进入未完成列表"
-        : `笔记已保存到 ${target || "根目录"}`,
-    );
+    toast.success(`笔记已保存到 ${target || "根目录"}`);
   },
 
   createNoteIn(title, folder) {
@@ -1389,7 +1512,7 @@ export const useStore = create<AppState>((set, get) => ({
     repo.delete(id).catch(() => undefined);
     set((s) => ({
       views: s.views.filter((v) => v.id !== id),
-      view: s.viewId === id ? "due" : s.view,
+      view: s.viewId === id ? "board" : s.view,
       viewId: s.viewId === id ? null : s.viewId,
     }));
     toast.success("视图已删除");
@@ -1434,7 +1557,7 @@ export const useStore = create<AppState>((set, get) => ({
     set((s) => ({ wide: !s.wide }));
   },
 
-  /** "今天"视图：定位或创建当日笔记，返回其 id */
+  /** 定位或创建当日笔记（笔记菜单 →「今日笔记」），返回其 id */
   ensureDaily() {
     const found = get().notes.find((n) => n.date === TODAY && !n.vaultRoot);
     if (found) return found.id;
@@ -1589,7 +1712,12 @@ let lastSession = "";
 let initRan = false; // StrictMode 下 init 幂等护栏
 useStore.subscribe((s) => {
   if (!s.ready || s.needsVault) return;
-  const cur = JSON.stringify({ view: s.view, viewId: s.viewId, activeId: s.activeId });
+  const cur = JSON.stringify({
+    view: s.view,
+    viewId: s.viewId,
+    activeId: s.activeId,
+    activeIssueId: s.activeIssueId,
+  });
   if (cur === lastSession) return;
   lastSession = cur;
   localStorage.setItem(SESSION_KEY, cur);

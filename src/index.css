@@ -42,7 +42,6 @@
   --color-st-doing: var(--st-doing);
   --color-st-blocked: var(--st-blocked);
   --color-st-done: var(--st-done);
-  --color-st-wont: var(--st-wont);
   --color-wikilink: var(--wikilink);
   --color-seal: var(--seal);
   --color-daily: var(--daily);
@@ -87,7 +86,6 @@
   --st-doing: #2b4c7e;
   --st-blocked: #be4b31;
   --st-done: #4a7c59;
-  --st-wont: #a9aab2;
   --wikilink: #35618f;
   --seal: #be4b31;
   --daily: #7a557e;
@@ -125,7 +123,6 @@
   --st-doing: #7fa3d4;
   --st-blocked: #d97b62;
   --st-done: #7fab8c;
-  --st-wont: #7a7b83;
   --wikilink: #8fb3de;
   --seal: #d97b62;
   --daily: #a983ad;

@@ -65,7 +65,7 @@ md.core.ruler.after("inline", "ink-tasks", (state) => {
     const open = new state.Token("html_inline", "", 0);
     open.content = `<div class="ink-task"><input type="checkbox" data-task="${idx}"${m[1] === "x" ? " checked" : ""} aria-label="任务" /><span class="tl">`;
     const close = new state.Token("html_inline", "", 0);
-    close.content = `</span>${meta}<button class="ink-to-task" data-to-task="${idx}" title="转为任务笔记">＋任务</button></div>`;
+    close.content = `</span>${meta}<button class="ink-to-task" data-to-task="${idx}" title="转为独立 Issue">＋Issue</button></div>`;
     t.children = [open, ...t.children, close];
   }
 });

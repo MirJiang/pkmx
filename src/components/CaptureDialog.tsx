@@ -1,11 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useStore } from "@/store";
-import { STATUS_LABEL } from "@/lib/types";
 
 export default function CaptureDialog() {
   const open = useStore((s) => s.captureOpen);
-  const captureStatus = useStore((s) => s.captureStatus);
   const setCaptureOpen = useStore((s) => s.setCaptureOpen);
   const capture = useStore((s) => s.capture);
   const defaultFolder = useStore((s) => s.defaultFolder);
@@ -19,10 +17,10 @@ export default function CaptureDialog() {
     }
   }, [open]);
 
-  const submit = (asTask: boolean) => {
+  const submit = (asIssue: boolean) => {
     const t = value.trim();
     if (!t) return;
-    capture(t, asTask);
+    capture(t, asIssue);
   };
 
   return (
@@ -44,33 +42,29 @@ export default function CaptureDialog() {
             onKeyDown={(e) => {
               if (e.key === "Enter") {
                 e.preventDefault();
-                submit(true);
+                submit(false);
               }
             }}
-            placeholder={
-              captureStatus
-                ? `一句话记下…（回车转为「${STATUS_LABEL[captureStatus]}」任务）`
-                : "一句话记下…（回车存为待办便签）"
-            }
+            placeholder="一句话记下…（回车保存为笔记）"
             className="flex-1 border-none bg-transparent font-serif text-base outline-none placeholder:font-sans placeholder:text-sm placeholder:text-muted-foreground"
           />
         </div>
         <div className="flex items-center gap-2 border-t border-border/70 px-3.5 py-2.5">
           <span className="font-mono text-[10.5px] text-muted-foreground">
-            保存到 <b className="text-primary">{defaultFolder || "根目录"}</b> · 之后整理
+            笔记保存到 <b className="text-primary">{defaultFolder || "根目录"}</b> · Issue 独立存储
           </span>
           <div className="ml-auto flex gap-1.5">
             <button
               className="rounded-lg border border-border px-3 py-[5px] text-xs text-muted-foreground transition-colors hover:border-primary hover:text-primary"
-              onClick={() => submit(false)}
+              onClick={() => submit(true)}
             >
-              存为普通笔记
+              创建 Issue
             </button>
             <button
               className="rounded-lg bg-primary px-3 py-[5px] text-xs text-primary-foreground transition-opacity hover:opacity-90"
-              onClick={() => submit(true)}
+              onClick={() => submit(false)}
             >
-              存为便签 ⏎
+              存为笔记 ⏎
             </button>
           </div>
         </div>

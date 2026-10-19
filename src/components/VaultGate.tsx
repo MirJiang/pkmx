@@ -13,12 +13,12 @@ const POINTS = [
   {
     icon: Link2,
     title: "双向链接",
-    desc: "用 [[笔记名]] 串联想法，在图谱里看见它们的关系。",
+    desc: "用 [[笔记名]] 串联想法，在反向链接与大纲里追溯上下文。",
   },
   {
     icon: ListChecks,
-    title: "任务与视图",
-    desc: "给笔记加上 status 就是任务，自动汇总到未完成列表。",
+    title: "Issue 与视图",
+    desc: "项目进度独立管理，Issue 与笔记分开存储、互不混杂。",
   },
 ];
 
@@ -47,7 +47,7 @@ export default function VaultGate() {
           </div>
           <h1 className="mt-5 font-serif text-[28px] font-bold tracking-tight">欢迎使用 PKMX</h1>
           <p className="mx-auto mt-2.5 max-w-[440px] text-[13.5px] leading-relaxed text-muted-foreground">
-            本地优先的 Markdown 笔记与任务。先选择一个文件夹作为你的文档目录，
+            本地优先的 Markdown 笔记与项目 Issue 管理。先选择一个文件夹作为你的文档目录，
             所有内容都会保存在里面，不会上传到任何地方。
           </p>
         </div>

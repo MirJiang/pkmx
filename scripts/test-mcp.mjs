@@ -1,7 +1,8 @@
 /**
- * tantivy 索引端到端测试：经 MCP stdio 实测（node scripts/test-mcp.mjs <exe路径>）
+ * MCP 端到端测试：经 stdio 实测（node scripts/test-mcp.mjs <exe路径>）
  * 覆盖：中英文搜索排序、多词 AND、标题命中、外部增/改/删的增量同步、
- *       单字符回退扫描、毫秒级 mtime 守卫、缺失文件友好错误、delete_note。
+ *       单字符回退扫描、毫秒级 mtime 守卫、缺失文件友好错误、delete_note、
+ *       旧任务自动迁移到独立 Issue 存储、Issue CRUD 与笔记目录隔离。
  */
 import { spawn } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync, unlinkSync, existsSync } from "node:fs";
@@ -23,7 +24,7 @@ function assert(cond, msg) {
   }
 }
 
-writeFileSync(join(vault, "量化策略.md"), `---\nstatus: Doing\n---\n\n# 量化策略笔记\n\n量化的回测设计，包含 router 转发与风控。\n`);
+writeFileSync(join(vault, "量化策略.md"), `# 量化策略笔记\n\n量化的回测设计，包含 router 转发与风控。\n`);
 writeFileSync(join(vault, "开发/框架设计.md"), `# 框架设计\n\n这是一个设计文档，提到框架的总体结构。\n`);
 writeFileSync(join(vault, "无关笔记.md"), `# 无关笔记\n\n今天天气不错，出去走了走。\n`);
 
@@ -148,6 +149,49 @@ r = await callTool("get_note", { rel: "待删除.md" });
 assert(r.result.isError === true && r.result.content[0].text.includes("笔记不存在"), "删除后 get_note 返回友好错误");
 r = await callTool("delete_note", { rel: "views/x.yml" });
 assert(r.result.isError === true && r.result.content[0].text.includes("视图工具"), "delete_note 拒绝视图路径");
+
+console.log("== 旧任务自动迁移 ==");
+writeFileSync(
+  join(vault, "旧任务.md"),
+  `---\nstatus: Doing\npriority: High\ndue: 2026-12-31\ncreated: 2026-01-02\n---\n\n# 旧任务标题\n\n迁移前正文。\n`,
+);
+r = await callTool("list_issues", {});
+let list = JSON.parse(r.result.content[0].text);
+assert(list.count === 1, `首次加载 Issue 时迁移旧任务（实际 ${list.count}）`);
+const migrated = list.issues[0];
+assert(migrated.title === "旧任务标题" && migrated.status === "Doing" && migrated.priority === "High", "迁移保留标题/状态/优先级");
+assert(migrated.due === "2026-12-31" && migrated.created === "2026-01-02", "迁移保留 due/created");
+assert(migrated.body === "迁移前正文。", "迁移正文去掉一级标题");
+assert(migrated.legacy === "旧任务.md", "记录原路径用于幂等");
+assert(existsSync(join(vault, ".pkmx", "issues.json")), "Issue 独立 JSON 已写入");
+assert(!existsSync(join(vault, "旧任务.md")), "原 Markdown 已从笔记目录移除");
+assert(existsSync(join(vault, ".pkmx", "legacy-backup", "旧任务.md")), "原文件已备份到 .pkmx/legacy-backup");
+r = await callTool("search_notes", { query: "迁移前正文" });
+assert(JSON.parse(r.result.content[0].text).count === 0, "迁移后的旧任务不再出现在笔记搜索中");
+
+console.log("== Issue CRUD 与笔记隔离 ==");
+r = await callTool("create_issue", { title: "独立 Issue", status: "Todo", priority: "Urgent", due: "2027-01-15", body: "不落 Markdown" });
+assert(r.result.isError !== true, "create_issue 成功");
+const created = JSON.parse(r.result.content[0].text);
+assert(created.id.startsWith("iss_") && created.title === "独立 Issue", "返回独立 id 与标题");
+assert(!existsSync(join(vault, "独立 Issue.md")), "创建 Issue 不会生成 Markdown 笔记");
+r = await callTool("get_issue", { id: created.id });
+const gotIssue = JSON.parse(r.result.content[0].text);
+assert(gotIssue.body === "不落 Markdown" && typeof gotIssue.mtime === "number", "get_issue 返回正文与 mtime");
+r = await callTool("update_issue", { id: created.id, status: "Done", expected_mtime: gotIssue.mtime - 1 });
+assert(r.result.isError === true && r.result.content[0].text.includes("mtime 不匹配"), "过期 mtime 阻止更新");
+r = await callTool("update_issue", { id: created.id, status: "Done", expected_mtime: gotIssue.mtime });
+const updated = JSON.parse(r.result.content[0].text);
+assert(updated.status === "Done" && Boolean(updated.done), "状态改为 Done 自动记录完成日期");
+assert(updated.legacy === undefined, "新建 Issue 不带 legacy 字段");
+r = await callTool("list_issues", { status: "Done" });
+const doneList = JSON.parse(r.result.content[0].text);
+assert(doneList.count === 1 && doneList.issues[0].id === created.id, "list_issues 按状态过滤");
+r = await callTool("delete_issue", { id: created.id });
+assert(r.result.isError !== true, "delete_issue 成功");
+r = await callTool("get_issue", { id: created.id });
+assert(r.result.isError === true && r.result.content[0].text.includes("Issue 不存在"), "删除后 get_issue 返回友好错误");
+assert(JSON.parse((await callTool("list_issues", {})).result.content[0].text).count === 1, "删除后只剩迁移来的 Issue");
 
 child.kill();
 rmSync(vault, { recursive: true, force: true });

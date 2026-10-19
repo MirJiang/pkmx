@@ -1,13 +1,7 @@
-import { Plus, PlusCircle, Trash2, Waypoints } from "lucide-react";
-import {
-  AlarmClock,
-  Calendar,
-  TrendingUp,
-} from "lucide-react";
+import { Archive, FileText, Kanban, Plus, PlusCircle, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useStore, type ViewKind } from "@/store";
 import { isTauri } from "@/lib/vault";
-import { lastNDays } from "@/lib/dates";
 import { open } from "@tauri-apps/plugin-dialog";
 import FileTree from "./FileTree";
 import {
@@ -27,25 +21,33 @@ function SecHeader({ label, action }: { label: string; action?: React.ReactNode 
 }
 
 export default function Sidebar() {
-  const notes = useStore((s) => s.notes);
   const views = useStore((s) => s.views);
+  const issues = useStore((s) => s.issues);
   const view = useStore((s) => s.view);
   const viewId = useStore((s) => s.viewId);
   const setView = useStore((s) => s.setView);
   const setCaptureOpen = useStore((s) => s.setCaptureOpen);
   const openPrompt = useStore((s) => s.openPrompt);
   const createNoteIn = useStore((s) => s.createNoteIn);
+  const createIssue = useStore((s) => s.createIssue);
   const deleteView = useStore((s) => s.deleteView);
 
-  const openTasks = notes.filter((n) => n.status && ["Todo", "Doing", "Blocked"].includes(n.status)).length;
-  const doneCnt = notes.filter((n) => n.done && lastNDays(7).includes(n.done)).length;
+  const openIssues = issues.filter((i) => i.status !== "Done").length;
+  const archived = issues.filter((i) => i.status === "Done").length;
 
   const items: { kind: ViewKind; icon: React.ReactNode; label: string; cnt?: number; hot?: boolean }[] = [
-    { kind: "daily", icon: <Calendar size={14} strokeWidth={1.4} />, label: "今天" },
-    { kind: "due", icon: <AlarmClock size={14} strokeWidth={1.4} />, label: "未完成", cnt: openTasks },
-    { kind: "week", icon: <TrendingUp size={14} strokeWidth={1.4} />, label: "已完成", cnt: doneCnt },
-    { kind: "graph", icon: <Waypoints size={14} strokeWidth={1.4} />, label: "图谱" },
+    { kind: "board", icon: <Kanban size={14} strokeWidth={1.4} />, label: "Issue 看板", cnt: openIssues },
+    { kind: "archive", icon: <Archive size={14} strokeWidth={1.4} />, label: "已归档", cnt: archived },
+    { kind: "report", icon: <FileText size={14} strokeWidth={1.4} />, label: "工作报告" },
   ];
+
+  const newIssue = async () => {
+    const v = await openPrompt("新建 Issue", {
+      label: "独立于笔记，保存在 .pkmx/issues.json",
+      placeholder: "Issue 标题…",
+    });
+    if (v?.trim()) createIssue(v.trim());
+  };
 
   const newNote = async (folder = "") => {
     const v = await openPrompt(folder ? `在 ${folder}/ 新建笔记` : "新建笔记", {
@@ -85,7 +87,19 @@ export default function Sidebar() {
 
   return (
     <nav className="flex w-[248px] shrink-0 flex-col overflow-y-auto border-r border-border bg-sidebar px-2 pb-2">
-      <SecHeader label="视图" />
+      <SecHeader
+        label="视图"
+        action={
+          <button
+            className="grid size-[19px] place-items-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-primary"
+            title="新建 Issue"
+            aria-label="新建 Issue"
+            onClick={() => void newIssue()}
+          >
+            <Plus size={13} strokeWidth={1.8} />
+          </button>
+        }
+      />
       {items.map((it) => (
         <button
           key={it.kind}
@@ -156,6 +170,14 @@ export default function Sidebar() {
             <DropdownMenuContent align="start">
               <DropdownMenuItem onClick={() => void newNote("")}>新建笔记…</DropdownMenuItem>
               <DropdownMenuItem onClick={() => void newFolder()}>新建文件夹…</DropdownMenuItem>
+              <DropdownMenuItem
+                onClick={() => {
+                  const id = useStore.getState().ensureDaily();
+                  if (id) useStore.setState({ activeId: id, view: "note", activeIssueId: null });
+                }}
+              >
+                今日笔记
+              </DropdownMenuItem>
               {isTauri() && (
                 <>
                   <DropdownMenuItem onClick={() => void openFiles()}>打开文件…</DropdownMenuItem>

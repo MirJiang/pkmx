@@ -3,11 +3,11 @@ import { cn } from "@/lib/utils";
 
 const VIEW_LABEL: Record<string, string> = {
   note: "笔记",
-  daily: "今天",
-  due: "未完成",
-  week: "已完成",
+  board: "Issue 看板",
+  archive: "已归档",
+  report: "工作报告",
   search: "搜索",
-  graph: "图谱",
+  issue: "Issue",
   saved: "保存视图",
   settings: "设置",
 };
@@ -16,13 +16,14 @@ export default function Statusbar() {
   const view = useStore((s) => s.view);
   const needsVault = useStore((s) => s.needsVault);
   const notes = useStore((s) => s.notes);
-  const open = notes.filter((n) => n.status && !["Done", "Wont"].includes(n.status)).length;
+  const issues = useStore((s) => s.issues);
+  const open = issues.filter((i) => i.status !== "Done").length;
 
   return (
     <footer className="flex h-[27px] items-center gap-4 border-t border-border bg-secondary px-3.5 font-mono text-[10.5px] text-muted-foreground select-none">
       <span>{VIEW_LABEL[view] ?? view}</span>
       <span>
-        {notes.length} 篇笔记 · {open} 个未关闭任务
+        {notes.length} 篇笔记 · {open} 个未关闭 Issue
       </span>
       <div className="ml-auto flex gap-3.5">
         <span className="hidden [@media(min-width:1080px)]:inline">

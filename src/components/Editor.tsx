@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, FolderInput, Pin, RefreshCw, Trash2 } from "lucide-react";
+import { FolderInput, Pin, RefreshCw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { useStore, getVault, getAttachmentUrl, revealNoteInExplorer } from "@/store";
 import { isTauri } from "@/lib/vault";
 import { renderMarkdown, splitBlocks, joinBlocks, countTasks, type MdBlock } from "@/lib/markdown";
 import { TODAY } from "@/lib/dates";
-import { PRIORITY_LABEL, STATUSES, STATUS_COLOR, STATUS_LABEL, type Note, type Status } from "@/lib/types";
+import { type Issue, type Note } from "@/lib/types";
 import { DueChip, PriorityChip, StatusDot } from "./Chips";
 import ContextMenu from "./ContextMenu";
 import {
@@ -20,111 +20,42 @@ import {
 const EMPTY: string[] = [];
 
 function PropsBar({ note }: { note: Note }) {
-  const setStatus = useStore((s) => s.setStatus);
-  const cyclePriority = useStore((s) => s.cyclePriority);
-  const setDue = useStore((s) => s.setDue);
-  const unTask = useStore((s) => s.unTask);
-  const taskToCheckbox = useStore((s) => s.taskToCheckbox);
-  const isTask = Boolean(note.status);
-  const isDaily = Boolean(note.date);
-
-  if (!isTask && !isDaily) return null;
+  if (!note.date) return null;
   return (
     <div className="mb-5 flex flex-wrap items-center gap-1.5 rounded-xl border border-dashed border-border bg-secondary/60 px-3 py-2 font-mono text-[11px]">
-      {note.status && (
-        <DropdownMenu>
-          <DropdownMenuTrigger className="flex items-center gap-1.5 rounded px-1 py-0.5 text-secondary-foreground transition-colors hover:bg-accent">
-            <span className="text-muted-foreground">status:</span>
-            <span style={{ color: STATUS_COLOR[note.status] }}>{STATUS_LABEL[note.status]}</span>
-            <ChevronDown size={9} className="opacity-50" />
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start">
-            {STATUSES.map((s: Status) => (
-              <DropdownMenuItem key={s} onClick={() => setStatus(note.id, s)}>
-                <span
-                  className="inline-block size-[7px] rounded-full"
-                  style={{ background: STATUS_COLOR[s] }}
-                />
-                {STATUS_LABEL[s]}
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuContent>
-        </DropdownMenu>
-      )}
-      {note.priority && (
-        <button
-          className="flex items-center gap-1.5 rounded px-1 py-0.5 transition-colors hover:bg-accent"
-          onClick={() => cyclePriority(note.id)}
-          title="点击切换优先级"
-        >
-          <span className="text-muted-foreground">priority:</span>
-          <span className="text-foreground">{PRIORITY_LABEL[note.priority]}</span>
-        </button>
-      )}
-      {note.status && (
-        <label className="flex items-center gap-1.5 rounded px-1 py-0.5 transition-colors hover:bg-accent">
-          <span className="text-muted-foreground">due:</span>
-          <input
-            type="date"
-            value={note.due ?? ""}
-            onChange={(e) => setDue(note.id, e.target.value)}
-            className="border-none bg-transparent p-0 font-mono text-[11px] text-foreground outline-none"
-          />
-        </label>
-      )}
-      {note.date && (
-        <span className="flex items-center gap-1.5 px-1 py-0.5">
-          <span className="text-muted-foreground">date:</span>
-          <span className="text-foreground">{note.date}</span>
-        </span>
-      )}
-      {isTask && (
-        <>
-          <button
-            className="rounded px-1.5 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-            onClick={() => taskToCheckbox(note.id)}
-            title="把这条任务变成今日笔记里的一个勾选项"
-          >
-            ⇩ 转为今日勾选项
-          </button>
-          <button
-            className="ml-auto rounded px-1.5 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-            onClick={() => unTask(note.id)}
-            title="移除任务属性"
-          >
-            × 取消任务
-          </button>
-        </>
-      )}
+      <span className="flex items-center gap-1.5 px-1 py-0.5">
+        <span className="text-muted-foreground">date:</span>
+        <span className="text-foreground">{note.date}</span>
+      </span>
     </div>
   );
 }
 
 /* ---------- Daily 自动聚合区 ---------- */
 function DailyInjections({ note }: { note: Note }) {
-  const notes = useStore((s) => s.notes);
-  const openNote = useStore((s) => s.openNote);
+  const issues = useStore((s) => s.issues);
+  const openIssue = useStore((s) => s.openIssue);
   const pinInjection = useStore((s) => s.pinInjection);
   // 注意：selector 必须返回稳定引用（zustand v5 用 Object.is 比较），?? [] 要放在外面
   const pinnedAll = useStore((s) => s.pinnedInjections);
   const pinned = pinnedAll[note.id] ?? EMPTY;
   const [tick, setTick] = useState(0);
 
-  const due = notes
-    .filter((n) => n.status && n.due && n.due <= TODAY && !["Done", "Wont"].includes(n.status))
+  const due = issues
+    .filter((i) => i.due && i.due <= TODAY && i.status !== "Done")
     .sort((a, b) => (a.due! < b.due! ? -1 : 1));
-  const done = notes.filter((n) => n.status && n.done === TODAY);
+  const done = issues.filter((i) => i.done === TODAY);
 
-  const row = (n: Note) => (
+  const row = (n: Issue) => (
     <button
       key={n.id}
-      onClick={() => openNote(n.id)}
+      onClick={() => openIssue(n.id)}
       className="flex w-full items-center gap-2.5 rounded-md px-2 py-[7px] text-left transition-colors hover:bg-accent"
     >
-      <StatusDot s={n.status!} />
+      <StatusDot s={n.status} />
       <span className="min-w-0 flex-1 truncate text-[13.5px]">{n.title}</span>
-      <PriorityChip p={n.priority!} />
-      <DueChip due={n.due!} />
+      <PriorityChip p={n.priority} />
+      {n.due && <DueChip due={n.due} />}
     </button>
   );
 
@@ -173,8 +104,8 @@ function DailyInjections({ note }: { note: Note }) {
 
   return (
     <div key={tick}>
-      {block("due", "今日到期", due.map(row), "今天没有到期的任务。")}
-      {block("done", "今日完成", done.map(row), "今天还没有完成的任务。")}
+      {block("due", "今日到期", due.map(row), "今天没有到期的 Issue。")}
+      {block("done", "今日完成", done.map(row), "今天还没有完成的 Issue。")}
     </div>
   );
 }
@@ -406,7 +337,7 @@ function SourceEditor({ note }: { note: Note }) {
         defaultValue={rawRef.current}
         key={note.id}
         spellCheck={false}
-        placeholder={"---\nstatus: Todo\n---\n\n# 标题\n\n正文支持 [[双链]]、- [ ] 任务、**加粗**、> 引用…"}
+        placeholder={"# 标题\n\n正文支持 [[双链]]、- [ ] 勾选项、**加粗**、> 引用…"}
         onPaste={(e) => void onPaste(e)}
         onChange={(e) => {
           commit(e.target.value);
@@ -485,10 +416,9 @@ function BlockEditor({
   const notes = useStore((s) => s.notes);
   const wide = useStore((s) => s.wide);
   const toggleTask = useStore((s) => s.toggleTask);
-  const checkboxToTask = useStore((s) => s.checkboxToTask);
+  const checkboxToIssue = useStore((s) => s.checkboxToIssue);
   const openOrCreateByTitle = useStore((s) => s.openOrCreateByTitle);
   const confirmCreate = useStore((s) => s.confirmCreate);
-  const toTask = useStore((s) => s.toTask);
   const taRef = useRef<HTMLTextAreaElement>(null);
   /** 正在编辑的块（按起始行标识；-1 = 末尾追加新块） */
   const [editing, setEditing] = useState<number | null>(null);
@@ -647,12 +577,12 @@ function BlockEditor({
     }
   };
 
-  /** 与阅读模式同一套事件委托：勾选/转任务/双链 + 块点击进入编辑 */
+  /** 与阅读模式同一套事件委托：勾选/转 Issue/双链 + 块点击进入编辑 */
   const onDocClick = (e: React.MouseEvent<HTMLDivElement>) => {
     const el = e.target as HTMLElement;
-    const toTaskBtn = el.closest("button[data-to-task]");
-    if (toTaskBtn) {
-      checkboxToTask(note.id, +(toTaskBtn as HTMLElement).dataset.toTask!);
+    const toIssueBtn = el.closest("button[data-to-task]");
+    if (toIssueBtn) {
+      checkboxToIssue(note.id, +(toIssueBtn as HTMLElement).dataset.toTask!);
       return;
     }
     const task = el.closest("input[data-task]") as HTMLInputElement | null;
@@ -684,7 +614,7 @@ function BlockEditor({
         className="ink-block-edit"
         value={draft}
         spellCheck={false}
-        placeholder="空行分段，支持 [[双链]]、- [ ] 任务、**加粗**、> 引用、``` 代码块…（Ctrl+Enter 完成，Esc 取消）"
+        placeholder="空行分段，支持 [[双链]]、- [ ] 待办（可转为 Issue）、**加粗**、> 引用、``` 代码块…（Ctrl+Enter 完成，Esc 取消）"
         onChange={(e) => {
           setDraft(e.target.value);
           autosize(e.target);
@@ -722,14 +652,6 @@ function BlockEditor({
             </button>
           )}
         </div>
-        {!note.status && !note.date && (
-          <button
-            className="mx-auto mt-8 flex rounded-full border border-dashed border-border bg-card px-4 py-[7px] text-xs text-muted-foreground shadow-sm transition-colors hover:border-primary hover:text-primary"
-            onClick={() => toTask(note.id)}
-          >
-            ＋ 转为任务（添加 status 属性，进入未完成）
-          </button>
-        )}
       </article>
       {wl && matches.length > 0 && (
         <div
@@ -795,10 +717,9 @@ export default function Editor({ noteId }: { noteId: string }) {
   const setEditMode = useStore((s) => s.setEditMode);
   const toggleWide = useStore((s) => s.toggleWide);
   const toggleTask = useStore((s) => s.toggleTask);
-  const checkboxToTask = useStore((s) => s.checkboxToTask);
+  const checkboxToIssue = useStore((s) => s.checkboxToIssue);
   const openOrCreateByTitle = useStore((s) => s.openOrCreateByTitle);
   const confirmCreate = useStore((s) => s.confirmCreate);
-  const toTask = useStore((s) => s.toTask);
   const moveNote = useStore((s) => s.moveNote);
   const renameNote = useStore((s) => s.renameNote);
   const deleteNote = useStore((s) => s.deleteNote);
@@ -882,9 +803,9 @@ export default function Editor({ noteId }: { noteId: string }) {
 
   const onDocClick = (e: React.MouseEvent<HTMLDivElement>) => {
     const el = e.target as HTMLElement;
-    const toTaskBtn = el.closest("button[data-to-task]");
-    if (toTaskBtn) {
-      checkboxToTask(note.id, +(toTaskBtn as HTMLElement).dataset.toTask!);
+    const toIssueBtn = el.closest("button[data-to-task]");
+    if (toIssueBtn) {
+      checkboxToIssue(note.id, +(toIssueBtn as HTMLElement).dataset.toTask!);
       return;
     }
     const task = el.closest("input[data-task]") as HTMLInputElement | null;
@@ -1002,14 +923,6 @@ export default function Editor({ noteId }: { noteId: string }) {
                   __html: `<h1>${esc(note.title)}</h1><div class="sub-line">${esc(`${note.fileName}${createdAt}`)}</div>${html}`,
                 }}
               />
-              {!note.status && !note.date && (
-                <button
-                  className="sticky bottom-6 mx-auto mt-8 flex rounded-full border border-dashed border-border bg-card px-4 py-[7px] text-xs text-muted-foreground shadow-sm transition-colors hover:border-primary hover:text-primary"
-                  onClick={() => toTask(note.id)}
-                >
-                  ＋ 转为任务（添加 status 属性，进入未完成）
-                </button>
-              )}
             </article>
             {selLink && (
               <button
@@ -1033,38 +946,4 @@ export default function Editor({ noteId }: { noteId: string }) {
       {ctx && <ContextMenu x={ctx.x} y={ctx.y} items={areaMenuItems()} onClose={() => setCtx(null)} />}
     </div>
   );
-}
-
-/** "今天" 视图：定位或创建当日笔记并进入编辑器 */
-export function DailyView() {
-  const ensureDaily = useStore((s) => s.ensureDaily);
-  const notes = useStore((s) => s.notes);
-  const activeId = useStore((s) => s.activeId);
-
-  const daily = notes.find((n) => n.date === TODAY && !n.vaultRoot);
-  useEffect(() => {
-    if (daily && activeId !== daily.id) useStore.setState({ activeId: daily.id });
-  }, [daily, activeId]);
-
-  // 不自动落盘：当日笔记不存在时只给空态，点按钮才创建
-  if (!daily) {
-    return (
-      <div className="grid flex-1 place-items-center bg-background">
-        <div className="text-center">
-          <div className="font-serif text-[44px] opacity-25">P</div>
-          <p className="mt-2.5 text-[13px] text-muted-foreground">今天还没有笔记</p>
-          <button
-            className="mt-5 rounded-lg bg-primary px-4 py-2 text-[13px] text-primary-foreground transition-opacity hover:opacity-90"
-            onClick={() => {
-              const id = ensureDaily();
-              if (id) useStore.setState({ activeId: id });
-            }}
-          >
-            新建今日笔记
-          </button>
-        </div>
-      </div>
-    );
-  }
-  return <Editor noteId={daily.id} key={daily.id} />;
 }

@@ -16,7 +16,7 @@ import {
 
 const SHORTCUTS = [
   ["Ctrl + P", "快速打开（标题/文件名模糊跳转）"],
-  ["Ctrl + N", "快速捕获（回车存为待办便签）"],
+  ["Ctrl + N", "快速捕获（回车存为笔记）"],
   ["Ctrl + F", "全文搜索"],
   ["Ctrl + \\", "阅读 / 源码模式切换"],
 ];
@@ -28,6 +28,17 @@ const SECTION_META = [
 ] as const;
 
 type SectionKey = (typeof SECTION_META)[number]["key"];
+
+type McpPerms = {
+  create: boolean;
+  update: boolean;
+  append: boolean;
+  delete: boolean;
+  issue_read: boolean;
+  issue_write: boolean;
+  view_read: boolean;
+  view_write: boolean;
+};
 
 /** 把选择的目录换算成仓库内相对路径；目录不在仓库内返回 null */
 function toRel(root: string, dir: string): string | null {
@@ -119,28 +130,14 @@ export default function SettingsView() {
   };
 
   /** MCP 写入权限（桌面模式，Rust 侧持久化到用户配置目录 mcp.json） */
-  const [perms, setPerms] = useState<{
-    create: boolean;
-    update: boolean;
-    append: boolean;
-    delete: boolean;
-    view_read: boolean;
-    view_write: boolean;
-  } | null>(null);
+  const [perms, setPerms] = useState<McpPerms | null>(null);
   useEffect(() => {
     if (!isTauri()) return;
-    void invoke<{
-      create: boolean;
-      update: boolean;
-      append: boolean;
-      delete: boolean;
-      view_read: boolean;
-      view_write: boolean;
-    }>("mcp_get_perms")
+    void invoke<McpPerms>("mcp_get_perms")
       .then(setPerms)
       .catch(() => setPerms(null));
   }, []);
-  const flipPerm = (k: "create" | "update" | "append" | "delete" | "view_read" | "view_write") => {
+  const flipPerm = (k: keyof McpPerms) => {
     if (!perms) return;
     const next = { ...perms, [k]: !perms[k] };
     setPerms(next);
@@ -240,8 +237,8 @@ export default function SettingsView() {
                   title="默认文档地址"
                   desc={
                     <>
-                      软件内新建的笔记（含快速捕获）与 MCP 创建的 issue 默认存放在这个目录，留空即仓库根目录。
-                      目录是仓库内的相对路径。
+                      软件内新建的笔记（含快速捕获）默认存放在这个目录，留空即仓库根目录。
+                      目录是仓库内的相对路径；Issue 独立存储在 .pkmx/issues.json，不受此处影响。
                     </>
                   }
                 >
@@ -288,7 +285,8 @@ export default function SettingsView() {
                   desc={
                     <>
                       本程序可直接作为 MCP 服务器运行，供 Claude Code 等 agent 读写仓库。笔记工具：
-                      search_notes / get_note / create_note / create_task / update_note（mtime 守卫）/ append_to_note / delete_note；
+                      search_notes / get_note / create_note / update_note（mtime 守卫）/ append_to_note / delete_note；
+                      Issue 工具：list_issues / get_issue / create_issue / update_issue / delete_issue（create_task 为兼容别名）；
                       视图工具：list_views / get_view / run_view / create_view / update_view / delete_view，详见仓库 agent-docs/。
                       写入与删除类工具可在下方单独禁用，对已接入的 agent 即时生效。
                     </>
@@ -311,11 +309,9 @@ export default function SettingsView() {
                 </div>
                 {perms && (
                   <>
-                    <Row title="允许创建笔记与任务">
+                    <Row title="允许创建笔记">
                       <div className="flex items-center gap-3">
-                        <code className="font-mono text-[11px] text-muted-foreground">
-                          create_note / create_task
-                        </code>
+                        <code className="font-mono text-[11px] text-muted-foreground">create_note</code>
                         <PermSwitch on={perms.create} onChange={() => flipPerm("create")} />
                       </div>
                     </Row>
@@ -335,6 +331,20 @@ export default function SettingsView() {
                       <div className="flex items-center gap-3">
                         <code className="font-mono text-[11px] text-muted-foreground">delete_note</code>
                         <PermSwitch on={perms.delete} onChange={() => flipPerm("delete")} />
+                      </div>
+                    </Row>
+                    <Row title="允许读取 Issue">
+                      <div className="flex items-center gap-3">
+                        <code className="font-mono text-[11px] text-muted-foreground">list_issues / get_issue</code>
+                        <PermSwitch on={perms.issue_read} onChange={() => flipPerm("issue_read")} />
+                      </div>
+                    </Row>
+                    <Row title="允许管理 Issue">
+                      <div className="flex items-center gap-3">
+                        <code className="font-mono text-[11px] text-muted-foreground">
+                          create / update / delete_issue · create_task
+                        </code>
+                        <PermSwitch on={perms.issue_write} onChange={() => flipPerm("issue_write")} />
                       </div>
                     </Row>
                     <Row title="允许读取视图">

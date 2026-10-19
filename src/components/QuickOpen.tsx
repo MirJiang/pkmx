@@ -15,7 +15,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useStore } from "@/store";
-import { StatusChip } from "./Chips";
 
 export default function QuickOpen() {
   const open = useStore((s) => s.quickOpenOpen);
@@ -68,7 +67,6 @@ export default function QuickOpen() {
               >
                 <FileText size={13} strokeWidth={1.3} className="shrink-0 text-muted-foreground" />
                 <span className="truncate">{n.title}</span>
-                {n.status && <StatusChip s={n.status} />}
                 <span className="ml-auto max-w-[200px] truncate font-mono text-[10px] text-muted-foreground">
                   {n.fileName}
                 </span>

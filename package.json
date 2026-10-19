@@ -2,7 +2,7 @@
   "name": "pkmx",
   "private": true,
   "version": "0.1.0",
-  "description": "本地优先的 Markdown 笔记与任务应用",
+  "description": "本地优先的 Markdown 笔记与 Issue 管理应用",
   "author": "MirJiang",
   "license": "MIT",
   "repository": {

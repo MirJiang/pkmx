@@ -4,14 +4,16 @@ import { useStore } from "@/store";
 import { isTauri } from "@/lib/vault";
 import Titlebar from "@/components/Titlebar";
 import Sidebar from "@/components/Sidebar";
-import Editor, { DailyView } from "@/components/Editor";
-import { OpenView, DoneView, SavedViewRunner } from "@/components/Views";
+import Editor from "@/components/Editor";
+import { ArchiveView, SavedViewRunner } from "@/components/Views";
+import IssueView from "@/components/IssueView";
+import IssueBoard from "@/components/IssueBoard";
+import WorkReport from "@/components/WorkReport";
 import CaptureDialog from "@/components/CaptureDialog";
 import QuickOpen from "@/components/QuickOpen";
 import Statusbar from "@/components/Statusbar";
 import VaultGate from "@/components/VaultGate";
 import SearchView from "@/components/SearchView";
-import GraphView from "@/components/GraphView";
 import PromptDialog from "@/components/PromptDialog";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import SettingsView from "@/components/SettingsView";
@@ -202,16 +204,16 @@ export default function App() {
             <SettingsView />
           ) : needsVault ? (
             <VaultGate />
-          ) : view === "daily" ? (
-            <DailyView />
-          ) : view === "due" ? (
-            <OpenView />
-          ) : view === "week" ? (
-            <DoneView />
+          ) : view === "board" ? (
+            <IssueBoard />
+          ) : view === "archive" ? (
+            <ArchiveView />
+          ) : view === "report" ? (
+            <WorkReport />
           ) : view === "search" ? (
             <SearchView />
-          ) : view === "graph" ? (
-            <GraphView />
+          ) : view === "issue" ? (
+            <IssueView />
           ) : view === "saved" ? (
             <SavedViewRunner viewId={viewId} />
           ) : activeId ? (
